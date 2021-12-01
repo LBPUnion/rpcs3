@@ -61,7 +61,7 @@ windows_task:
 linux_task:
   container:
     image: rpcs3/rpcs3-ci-bionic:1.3
-    cpu: 12
+    cpu: 8
     memory: 10G
   env:
     BUILD_ARTIFACTSTAGINGDIRECTORY: ${CIRRUS_WORKING_DIR}/artifacts
