@@ -83,12 +83,6 @@ linux_task:
       gcc_script:
         - mkdir artifacts
         - ".ci/build-linux.sh"
-    - name: Cirrus Linux Clang
-      env:
-        COMPILER: clang
-      clang_script:
-        - mkdir artifacts
-        - ".ci/build-linux.sh"
   artifacts:
     name: Artifact
     path: "artifacts/*"
@@ -96,18 +90,3 @@ linux_task:
 #    if [ "$CIRRUS_REPO_OWNER" = "RPCS3" ] && [ -z "$CIRRUS_PR" ] && [ "$CIRRUS_BRANCH" = "master" ] && [ "$COMPILER" = "gcc" ]; then
 #      '.ci/github-upload.sh'
 #    fi;
-
-freebsd_task:
-  matrix:
-    - name: Cirrus FreeBSD
-      freebsd_instance:
-        image_family: freebsd-13-0
-        cpu: 8
-        memory: 8G
-  env:
-    CCACHE_MAXSIZE: 300M # 3x clean build, rounded
-    CCACHE_DIR: /tmp/ccache_dir
-  ccache_cache:
-    folder: /tmp/ccache_dir
-  install_script: "sh -ex ./.ci/install-freebsd.sh"
-  script: "./.ci/build-freebsd.sh"
