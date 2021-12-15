@@ -1582,7 +1582,7 @@ bool handle_access_violation(u32 addr, bool is_writing, x64_context* context) no
 	// Do not log any further access violations in this case.
 	if (!g_tls_access_violation_recovered)
 	{
-		vm_log.fatal("Access violation %s location 0x%x (%s) [type=u%u]", is_writing ? "writing" : "reading", addr, (is_writing && vm::check_addr(addr)) ? "read-only memory" : "unmapped memory", d_size * 8);
+		vm_log.fatal("Access violation %s location 0x%x (%s) [type=u%u]", is_writing ? "writing" : (cpu && cpu->id_type() == 1 && cpu->get_pc() == addr ? "executing" : "reading"), addr, (is_writing && vm::check_addr(addr)) ? "read-only memory" : "unmapped memory", d_size * 8);
 	}
 
 	while (Emu.IsPaused())
@@ -1825,6 +1825,14 @@ const bool s_exception_handler_set = []() -> bool
 		std::fprintf(stderr, "sigaction(SIGSEGV) failed (%d).\n", errno);
 		std::abort();
 	}
+
+#ifdef __APPLE__
+	if (::sigaction(SIGBUS, &sa, NULL) == -1)
+	{
+		std::fprintf(stderr, "sigaction(SIGBUS) failed (%d).\n", errno);
+		std::abort();
+	}
+#endif
 
 	sa.sa_handler = sigpipe_signaling_handler;
 	if (::sigaction(SIGPIPE, &sa, NULL) == -1)

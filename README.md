@@ -1,8 +1,7 @@
 LBPUnion/RPCS3
 =====
 
-This is a modified RPCS3 repository with the intention of enabling compatibility with [Project Lighthouse](https://github.com/LBPUnion/project-lighthouse) for the LittleBigPlanet games.
-
+This is a modified RPCS3 repository with the intention of enabling compatibility with [Project Lighthouse](https://github.com/LBPUnion/
 We are not RPCS3. This is simply a fork. You can view the main repository [here](https://github.com/RPCS3/rpcs3).
 
 ### RPCS3 Maintainers:
