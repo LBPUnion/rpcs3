@@ -90,6 +90,22 @@ static const bool s_tsx_avx = utils::has_avx();
 // For special case
 static const bool s_tsx_haswell = utils::has_rtm() && !utils::has_mpx();
 
+// Threshold for when rep mosvb is expected to outperform simd copies
+// The threshold will be 0xFFFFFFFF when the performance of rep movsb is expected to be bad
+static const u32 s_rep_movsb_threshold = utils::get_rep_movsb_threshold();
+
+#ifndef _MSC_VER
+static FORCE_INLINE void __movsb(unsigned char * Dst, const unsigned char * Src, size_t Size)
+{
+	__asm__ __volatile__
+	(
+		"rep; movsb" :
+		[Dst] "=D" (Dst), [Src] "=S" (Src), [Size] "=c" (Size) :
+		"[Dst]" (Dst), "[Src]" (Src), "[Size]" (Size)
+	);
+}
+#endif
+
 static FORCE_INLINE bool cmp_rdata_avx(const __m256i* lhs, const __m256i* rhs)
 {
 #if defined(_MSC_VER) || defined(__AVX__)
@@ -405,7 +421,7 @@ std::array<u32, 2> op_branch_targets(u32 pc, spu_opcode_t op)
 	return res;
 }
 
-const auto spu_putllc_tx = built_function<u64(*)(u32 raddr, u64 rtime, void* _old, const void* _new)>([](asmjit::X86Assembler& c, auto& args)
+const auto spu_putllc_tx = built_function<u64(*)(u32 raddr, u64 rtime, void* _old, const void* _new)>("spu_putllc_tx", [](asmjit::x86::Assembler& c, auto& args)
 {
 	using namespace asmjit;
 
@@ -420,12 +436,8 @@ const auto spu_putllc_tx = built_function<u64(*)(u32 raddr, u64 rtime, void* _ol
 	//}
 
 	// Create stack frame if necessary (Windows ABI has only 6 volatile vector registers)
-	c.push(x86::rbp);
-	c.push(x86::r13);
-	c.push(x86::r12);
-	c.push(x86::rbx);
-	c.sub(x86::rsp, 168);
 #ifdef _WIN32
+	c.sub(x86::rsp, 168);
 	if (s_tsx_avx)
 	{
 		c.vmovups(x86::oword_ptr(x86::rsp, 0), x86::xmm6);
@@ -447,28 +459,26 @@ const auto spu_putllc_tx = built_function<u64(*)(u32 raddr, u64 rtime, void* _ol
 #endif
 
 	// Prepare registers
-	build_swap_rdx_with(c, args, x86::r12);
-	c.mov(x86::rbp, x86::qword_ptr(reinterpret_cast<u64>(&vm::g_sudo_addr)));
-	c.lea(x86::rbp, x86::qword_ptr(x86::rbp, args[0]));
-	c.prefetchw(x86::byte_ptr(x86::rbp, 0));
-	c.prefetchw(x86::byte_ptr(x86::rbp, 64));
+	build_swap_rdx_with(c, args, x86::r10);
+	c.mov(args[1], x86::qword_ptr(reinterpret_cast<u64>(&vm::g_sudo_addr)));
+	c.lea(args[1], x86::qword_ptr(args[1], args[0]));
+	c.prefetchw(x86::byte_ptr(args[1], 0));
+	c.prefetchw(x86::byte_ptr(args[1], 64));
 	c.and_(args[0].r32(), 0xff80);
 	c.shr(args[0].r32(), 1);
-	c.lea(x86::rbx, x86::qword_ptr(reinterpret_cast<u64>(+vm::g_reservations), args[0]));
-	c.prefetchw(x86::byte_ptr(x86::rbx));
-	c.mov(x86::r13, args[1]);
+	c.lea(x86::r11, x86::qword_ptr(reinterpret_cast<u64>(+vm::g_reservations), args[0]));
 
 	// Prepare data
 	if (s_tsx_avx)
 	{
-		c.vmovups(x86::ymm0, x86::yword_ptr(args[2], 0));
-		c.vmovups(x86::ymm1, x86::yword_ptr(args[2], 32));
-		c.vmovups(x86::ymm2, x86::yword_ptr(args[2], 64));
-		c.vmovups(x86::ymm3, x86::yword_ptr(args[2], 96));
-		c.vmovups(x86::ymm4, x86::yword_ptr(args[3], 0));
-		c.vmovups(x86::ymm5, x86::yword_ptr(args[3], 32));
-		c.vmovups(x86::ymm6, x86::yword_ptr(args[3], 64));
-		c.vmovups(x86::ymm7, x86::yword_ptr(args[3], 96));
+		c.vmovups(x86::ymm0, x86::ymmword_ptr(args[2], 0));
+		c.vmovups(x86::ymm1, x86::ymmword_ptr(args[2], 32));
+		c.vmovups(x86::ymm2, x86::ymmword_ptr(args[2], 64));
+		c.vmovups(x86::ymm3, x86::ymmword_ptr(args[2], 96));
+		c.vmovups(x86::ymm4, x86::ymmword_ptr(args[3], 0));
+		c.vmovups(x86::ymm5, x86::ymmword_ptr(args[3], 32));
+		c.vmovups(x86::ymm6, x86::ymmword_ptr(args[3], 64));
+		c.vmovups(x86::ymm7, x86::ymmword_ptr(args[3], 96));
 	}
 	else
 	{
@@ -504,8 +514,6 @@ const auto spu_putllc_tx = built_function<u64(*)(u32 raddr, u64 rtime, void* _ol
 		c.cmp(x86::rax, x86::qword_ptr(reinterpret_cast<u64>(&g_rtm_tx_limit2)));
 		c.jae(fall);
 	});
-	c.prefetchw(x86::byte_ptr(x86::rbp, 0));
-	c.prefetchw(x86::byte_ptr(x86::rbp, 64));
 
 	// Check pause flag
 	c.bt(x86::dword_ptr(args[2], ::offset32(&spu_thread::state) - ::offset32(&spu_thread::rdata)), static_cast<u32>(cpu_flag::pause));
@@ -514,10 +522,10 @@ const auto spu_putllc_tx = built_function<u64(*)(u32 raddr, u64 rtime, void* _ol
 
 	if (s_tsx_avx)
 	{
-		c.vxorps(x86::ymm0, x86::ymm0, x86::yword_ptr(x86::rbp, 0));
-		c.vxorps(x86::ymm1, x86::ymm1, x86::yword_ptr(x86::rbp, 32));
-		c.vxorps(x86::ymm2, x86::ymm2, x86::yword_ptr(x86::rbp, 64));
-		c.vxorps(x86::ymm3, x86::ymm3, x86::yword_ptr(x86::rbp, 96));
+		c.vxorps(x86::ymm0, x86::ymm0, x86::ymmword_ptr(args[1], 0));
+		c.vxorps(x86::ymm1, x86::ymm1, x86::ymmword_ptr(args[1], 32));
+		c.vxorps(x86::ymm2, x86::ymm2, x86::ymmword_ptr(args[1], 64));
+		c.vxorps(x86::ymm3, x86::ymm3, x86::ymmword_ptr(args[1], 96));
 		c.vorps(x86::ymm0, x86::ymm0, x86::ymm1);
 		c.vorps(x86::ymm1, x86::ymm2, x86::ymm3);
 		c.vorps(x86::ymm0, x86::ymm1, x86::ymm0);
@@ -525,14 +533,14 @@ const auto spu_putllc_tx = built_function<u64(*)(u32 raddr, u64 rtime, void* _ol
 	}
 	else
 	{
-		c.xorps(x86::xmm0, x86::oword_ptr(x86::rbp, 0));
-		c.xorps(x86::xmm1, x86::oword_ptr(x86::rbp, 16));
-		c.xorps(x86::xmm2, x86::oword_ptr(x86::rbp, 32));
-		c.xorps(x86::xmm3, x86::oword_ptr(x86::rbp, 48));
-		c.xorps(x86::xmm4, x86::oword_ptr(x86::rbp, 64));
-		c.xorps(x86::xmm5, x86::oword_ptr(x86::rbp, 80));
-		c.xorps(x86::xmm6, x86::oword_ptr(x86::rbp, 96));
-		c.xorps(x86::xmm7, x86::oword_ptr(x86::rbp, 112));
+		c.xorps(x86::xmm0, x86::oword_ptr(args[1], 0));
+		c.xorps(x86::xmm1, x86::oword_ptr(args[1], 16));
+		c.xorps(x86::xmm2, x86::oword_ptr(args[1], 32));
+		c.xorps(x86::xmm3, x86::oword_ptr(args[1], 48));
+		c.xorps(x86::xmm4, x86::oword_ptr(args[1], 64));
+		c.xorps(x86::xmm5, x86::oword_ptr(args[1], 80));
+		c.xorps(x86::xmm6, x86::oword_ptr(args[1], 96));
+		c.xorps(x86::xmm7, x86::oword_ptr(args[1], 112));
 		c.orps(x86::xmm0, x86::xmm1);
 		c.orps(x86::xmm2, x86::xmm3);
 		c.orps(x86::xmm4, x86::xmm5);
@@ -547,25 +555,25 @@ const auto spu_putllc_tx = built_function<u64(*)(u32 raddr, u64 rtime, void* _ol
 
 	if (s_tsx_avx)
 	{
-		c.vmovaps(x86::yword_ptr(x86::rbp, 0), x86::ymm4);
-		c.vmovaps(x86::yword_ptr(x86::rbp, 32), x86::ymm5);
-		c.vmovaps(x86::yword_ptr(x86::rbp, 64), x86::ymm6);
-		c.vmovaps(x86::yword_ptr(x86::rbp, 96), x86::ymm7);
+		c.vmovaps(x86::ymmword_ptr(args[1], 0), x86::ymm4);
+		c.vmovaps(x86::ymmword_ptr(args[1], 32), x86::ymm5);
+		c.vmovaps(x86::ymmword_ptr(args[1], 64), x86::ymm6);
+		c.vmovaps(x86::ymmword_ptr(args[1], 96), x86::ymm7);
 	}
 	else
 	{
-		c.movaps(x86::oword_ptr(x86::rbp, 0), x86::xmm8);
-		c.movaps(x86::oword_ptr(x86::rbp, 16), x86::xmm9);
-		c.movaps(x86::oword_ptr(x86::rbp, 32), x86::xmm10);
-		c.movaps(x86::oword_ptr(x86::rbp, 48), x86::xmm11);
-		c.movaps(x86::oword_ptr(x86::rbp, 64), x86::xmm12);
-		c.movaps(x86::oword_ptr(x86::rbp, 80), x86::xmm13);
-		c.movaps(x86::oword_ptr(x86::rbp, 96), x86::xmm14);
-		c.movaps(x86::oword_ptr(x86::rbp, 112), x86::xmm15);
+		c.movaps(x86::oword_ptr(args[1], 0), x86::xmm8);
+		c.movaps(x86::oword_ptr(args[1], 16), x86::xmm9);
+		c.movaps(x86::oword_ptr(args[1], 32), x86::xmm10);
+		c.movaps(x86::oword_ptr(args[1], 48), x86::xmm11);
+		c.movaps(x86::oword_ptr(args[1], 64), x86::xmm12);
+		c.movaps(x86::oword_ptr(args[1], 80), x86::xmm13);
+		c.movaps(x86::oword_ptr(args[1], 96), x86::xmm14);
+		c.movaps(x86::oword_ptr(args[1], 112), x86::xmm15);
 	}
 
 	c.xend();
-	c.lock().add(x86::qword_ptr(x86::rbx), 64);
+	c.lock().add(x86::qword_ptr(x86::r11), 64);
 	c.add(x86::qword_ptr(args[2], ::offset32(&spu_thread::stx) - ::offset32(&spu_thread::rdata)), 1);
 	build_get_tsc(c);
 	c.sub(x86::rax, stamp0);
@@ -577,21 +585,21 @@ const auto spu_putllc_tx = built_function<u64(*)(u32 raddr, u64 rtime, void* _ol
 	// Load previous data to store back to rdata
 	if (s_tsx_avx)
 	{
-		c.vmovaps(x86::ymm0, x86::yword_ptr(x86::rbp, 0));
-		c.vmovaps(x86::ymm1, x86::yword_ptr(x86::rbp, 32));
-		c.vmovaps(x86::ymm2, x86::yword_ptr(x86::rbp, 64));
-		c.vmovaps(x86::ymm3, x86::yword_ptr(x86::rbp, 96));
+		c.vmovaps(x86::ymm0, x86::ymmword_ptr(args[1], 0));
+		c.vmovaps(x86::ymm1, x86::ymmword_ptr(args[1], 32));
+		c.vmovaps(x86::ymm2, x86::ymmword_ptr(args[1], 64));
+		c.vmovaps(x86::ymm3, x86::ymmword_ptr(args[1], 96));
 	}
 	else
 	{
-		c.movaps(x86::xmm0, x86::oword_ptr(x86::rbp, 0));
-		c.movaps(x86::xmm1, x86::oword_ptr(x86::rbp, 16));
-		c.movaps(x86::xmm2, x86::oword_ptr(x86::rbp, 32));
-		c.movaps(x86::xmm3, x86::oword_ptr(x86::rbp, 48));
-		c.movaps(x86::xmm4, x86::oword_ptr(x86::rbp, 64));
-		c.movaps(x86::xmm5, x86::oword_ptr(x86::rbp, 80));
-		c.movaps(x86::xmm6, x86::oword_ptr(x86::rbp, 96));
-		c.movaps(x86::xmm7, x86::oword_ptr(x86::rbp, 112));
+		c.movaps(x86::xmm0, x86::oword_ptr(args[1], 0));
+		c.movaps(x86::xmm1, x86::oword_ptr(args[1], 16));
+		c.movaps(x86::xmm2, x86::oword_ptr(args[1], 32));
+		c.movaps(x86::xmm3, x86::oword_ptr(args[1], 48));
+		c.movaps(x86::xmm4, x86::oword_ptr(args[1], 64));
+		c.movaps(x86::xmm5, x86::oword_ptr(args[1], 80));
+		c.movaps(x86::xmm6, x86::oword_ptr(args[1], 96));
+		c.movaps(x86::xmm7, x86::oword_ptr(args[1], 112));
 	}
 
 	c.xend();
@@ -603,16 +611,16 @@ const auto spu_putllc_tx = built_function<u64(*)(u32 raddr, u64 rtime, void* _ol
 	c.jmp(_ret);
 
 	c.bind(fail2);
-	c.lock().sub(x86::qword_ptr(x86::rbx), 64);
+	c.lock().sub(x86::qword_ptr(x86::r11), 64);
 	c.bind(load);
 
 	// Store previous data back to rdata
 	if (s_tsx_avx)
 	{
-		c.vmovaps(x86::yword_ptr(args[2], 0), x86::ymm0);
-		c.vmovaps(x86::yword_ptr(args[2], 32), x86::ymm1);
-		c.vmovaps(x86::yword_ptr(args[2], 64), x86::ymm2);
-		c.vmovaps(x86::yword_ptr(args[2], 96), x86::ymm3);
+		c.vmovaps(x86::ymmword_ptr(args[2], 0), x86::ymm0);
+		c.vmovaps(x86::ymmword_ptr(args[2], 32), x86::ymm1);
+		c.vmovaps(x86::ymmword_ptr(args[2], 64), x86::ymm2);
+		c.vmovaps(x86::ymmword_ptr(args[2], 96), x86::ymm3);
 	}
 	else
 	{
@@ -652,6 +660,7 @@ const auto spu_putllc_tx = built_function<u64(*)(u32 raddr, u64 rtime, void* _ol
 		c.movups(x86::xmm14, x86::oword_ptr(x86::rsp, 128));
 		c.movups(x86::xmm15, x86::oword_ptr(x86::rsp, 144));
 	}
+	c.add(x86::rsp, 168);
 #endif
 
 	if (s_tsx_avx)
@@ -659,15 +668,18 @@ const auto spu_putllc_tx = built_function<u64(*)(u32 raddr, u64 rtime, void* _ol
 		c.vzeroupper();
 	}
 
-	c.add(x86::rsp, 168);
-	c.pop(x86::rbx);
-	c.pop(x86::r12);
-	c.pop(x86::r13);
-	c.pop(x86::rbp);
+#ifdef __linux__
+	// Hack for perf profiling (TODO)
+	Label ret2 = c.newLabel();
+	c.lea(x86::rdx, x86::qword_ptr(ret2));
+	c.push(x86::rdx);
+	c.push(x86::rdx);
+	c.bind(ret2);
+#endif
 	c.ret();
 });
 
-const auto spu_putlluc_tx = built_function<u64(*)(u32 raddr, const void* rdata, u64* _stx, u64* _ftx)>([](asmjit::X86Assembler& c, auto& args)
+const auto spu_putlluc_tx = built_function<u64(*)(u32 raddr, const void* rdata, u64* _stx, u64* _ftx)>("spu_putlluc_tx", [](asmjit::x86::Assembler& c, auto& args)
 {
 	using namespace asmjit;
 
@@ -680,38 +692,28 @@ const auto spu_putlluc_tx = built_function<u64(*)(u32 raddr, const void* rdata, 
 	//}
 
 	// Create stack frame if necessary (Windows ABI has only 6 volatile vector registers)
-	c.push(x86::rbp);
-	c.push(x86::r13);
-	c.push(x86::r12);
-	c.push(x86::rbx);
-	c.sub(x86::rsp, 40);
 #ifdef _WIN32
+	c.sub(x86::rsp, 40);
 	if (!s_tsx_avx)
 	{
 		c.movups(x86::oword_ptr(x86::rsp, 0), x86::xmm6);
 		c.movups(x86::oword_ptr(x86::rsp, 16), x86::xmm7);
 	}
 #endif
-
 	// Prepare registers
-	build_swap_rdx_with(c, args, x86::r12);
-	c.mov(x86::rbp, x86::qword_ptr(reinterpret_cast<u64>(&vm::g_sudo_addr)));
-	c.lea(x86::rbp, x86::qword_ptr(x86::rbp, args[0]));
-	c.prefetchw(x86::byte_ptr(x86::rbp, 0));
-	c.prefetchw(x86::byte_ptr(x86::rbp, 64));
-	c.and_(args[0].r32(), 0xff80);
-	c.shr(args[0].r32(), 1);
-	c.lea(x86::rbx, x86::qword_ptr(reinterpret_cast<u64>(+vm::g_reservations), args[0]));
-	c.prefetchw(x86::byte_ptr(x86::rbx));
-	c.mov(x86::r13, args[1]);
+	build_swap_rdx_with(c, args, x86::r10);
+	c.mov(x86::r11, x86::qword_ptr(reinterpret_cast<u64>(&vm::g_sudo_addr)));
+	c.lea(x86::r11, x86::qword_ptr(x86::r11, args[0]));
+	c.prefetchw(x86::byte_ptr(x86::r11, 0));
+	c.prefetchw(x86::byte_ptr(x86::r11, 64));
 
 	// Prepare data
 	if (s_tsx_avx)
 	{
-		c.vmovups(x86::ymm0, x86::yword_ptr(args[1], 0));
-		c.vmovups(x86::ymm1, x86::yword_ptr(args[1], 32));
-		c.vmovups(x86::ymm2, x86::yword_ptr(args[1], 64));
-		c.vmovups(x86::ymm3, x86::yword_ptr(args[1], 96));
+		c.vmovups(x86::ymm0, x86::ymmword_ptr(args[1], 0));
+		c.vmovups(x86::ymm1, x86::ymmword_ptr(args[1], 32));
+		c.vmovups(x86::ymm2, x86::ymmword_ptr(args[1], 64));
+		c.vmovups(x86::ymm3, x86::ymmword_ptr(args[1], 96));
 	}
 	else
 	{
@@ -724,6 +726,10 @@ const auto spu_putlluc_tx = built_function<u64(*)(u32 raddr, const void* rdata, 
 		c.movaps(x86::xmm6, x86::oword_ptr(args[1], 96));
 		c.movaps(x86::xmm7, x86::oword_ptr(args[1], 112));
 	}
+
+	c.and_(args[0].r32(), 0xff80);
+	c.shr(args[0].r32(), 1);
+	c.lea(args[1], x86::qword_ptr(reinterpret_cast<u64>(+vm::g_reservations), args[0]));
 
 	// Alloc args[0] to stamp0
 	const auto stamp0 = args[0];
@@ -739,35 +745,29 @@ const auto spu_putlluc_tx = built_function<u64(*)(u32 raddr, const void* rdata, 
 		c.jae(fall);
 	});
 
-	c.prefetchw(x86::byte_ptr(x86::rbp, 0));
-	c.prefetchw(x86::byte_ptr(x86::rbp, 64));
-
-	// // Check pause flag
-	// c.bt(x86::dword_ptr(args[2], ::offset32(&cpu_thread::state)), static_cast<u32>(cpu_flag::pause));
-	// c.jc(fall);
 	c.xbegin(tx1);
 
 	if (s_tsx_avx)
 	{
-		c.vmovaps(x86::yword_ptr(x86::rbp, 0), x86::ymm0);
-		c.vmovaps(x86::yword_ptr(x86::rbp, 32), x86::ymm1);
-		c.vmovaps(x86::yword_ptr(x86::rbp, 64), x86::ymm2);
-		c.vmovaps(x86::yword_ptr(x86::rbp, 96), x86::ymm3);
+		c.vmovaps(x86::ymmword_ptr(x86::r11, 0), x86::ymm0);
+		c.vmovaps(x86::ymmword_ptr(x86::r11, 32), x86::ymm1);
+		c.vmovaps(x86::ymmword_ptr(x86::r11, 64), x86::ymm2);
+		c.vmovaps(x86::ymmword_ptr(x86::r11, 96), x86::ymm3);
 	}
 	else
 	{
-		c.movaps(x86::oword_ptr(x86::rbp, 0), x86::xmm0);
-		c.movaps(x86::oword_ptr(x86::rbp, 16), x86::xmm1);
-		c.movaps(x86::oword_ptr(x86::rbp, 32), x86::xmm2);
-		c.movaps(x86::oword_ptr(x86::rbp, 48), x86::xmm3);
-		c.movaps(x86::oword_ptr(x86::rbp, 64), x86::xmm4);
-		c.movaps(x86::oword_ptr(x86::rbp, 80), x86::xmm5);
-		c.movaps(x86::oword_ptr(x86::rbp, 96), x86::xmm6);
-		c.movaps(x86::oword_ptr(x86::rbp, 112), x86::xmm7);
+		c.movaps(x86::oword_ptr(x86::r11, 0), x86::xmm0);
+		c.movaps(x86::oword_ptr(x86::r11, 16), x86::xmm1);
+		c.movaps(x86::oword_ptr(x86::r11, 32), x86::xmm2);
+		c.movaps(x86::oword_ptr(x86::r11, 48), x86::xmm3);
+		c.movaps(x86::oword_ptr(x86::r11, 64), x86::xmm4);
+		c.movaps(x86::oword_ptr(x86::r11, 80), x86::xmm5);
+		c.movaps(x86::oword_ptr(x86::r11, 96), x86::xmm6);
+		c.movaps(x86::oword_ptr(x86::r11, 112), x86::xmm7);
 	}
 
 	c.xend();
-	c.lock().add(x86::qword_ptr(x86::rbx), 32);
+	c.lock().add(x86::qword_ptr(args[1]), 32);
 	// stx++
 	c.add(x86::qword_ptr(args[2]), 1);
 	build_get_tsc(c);
@@ -786,6 +786,7 @@ const auto spu_putlluc_tx = built_function<u64(*)(u32 raddr, const void* rdata, 
 		c.movups(x86::xmm6, x86::oword_ptr(x86::rsp, 0));
 		c.movups(x86::xmm7, x86::oword_ptr(x86::rsp, 16));
 	}
+	c.add(x86::rsp, 40);
 #endif
 
 	if (s_tsx_avx)
@@ -793,15 +794,18 @@ const auto spu_putlluc_tx = built_function<u64(*)(u32 raddr, const void* rdata, 
 		c.vzeroupper();
 	}
 
-	c.add(x86::rsp, 40);
-	c.pop(x86::rbx);
-	c.pop(x86::r12);
-	c.pop(x86::r13);
-	c.pop(x86::rbp);
+#ifdef __linux__
+	// Hack for perf profiling (TODO)
+	Label ret2 = c.newLabel();
+	c.lea(x86::rdx, x86::qword_ptr(ret2));
+	c.push(x86::rdx);
+	c.push(x86::rdx);
+	c.bind(ret2);
+#endif
 	c.ret();
 });
 
-const auto spu_getllar_tx = built_function<u64(*)(u32 raddr, void* rdata, cpu_thread* _cpu, u64 rtime)>([](asmjit::X86Assembler& c, auto& args)
+const auto spu_getllar_tx = built_function<u64(*)(u32 raddr, void* rdata, cpu_thread* _cpu, u64 rtime)>("spu_getllar_tx", [](asmjit::x86::Assembler& c, auto& args)
 {
 	using namespace asmjit;
 
@@ -815,8 +819,6 @@ const auto spu_getllar_tx = built_function<u64(*)(u32 raddr, void* rdata, cpu_th
 
 	// Create stack frame if necessary (Windows ABI has only 6 volatile vector registers)
 	c.push(x86::rbp);
-	c.push(x86::r13);
-	c.push(x86::r12);
 	c.push(x86::rbx);
 	c.sub(x86::rsp, 40);
 #ifdef _WIN32
@@ -828,13 +830,12 @@ const auto spu_getllar_tx = built_function<u64(*)(u32 raddr, void* rdata, cpu_th
 #endif
 
 	// Prepare registers
-	build_swap_rdx_with(c, args, x86::r12);
+	build_swap_rdx_with(c, args, x86::r10);
 	c.mov(x86::rbp, x86::qword_ptr(reinterpret_cast<u64>(&vm::g_sudo_addr)));
 	c.lea(x86::rbp, x86::qword_ptr(x86::rbp, args[0]));
 	c.and_(args[0].r32(), 0xff80);
 	c.shr(args[0].r32(), 1);
-	c.lea(x86::rbx, x86::qword_ptr(reinterpret_cast<u64>(+vm::g_reservations), args[0]));
-	c.mov(x86::r13, args[1]);
+	c.lea(x86::r11, x86::qword_ptr(reinterpret_cast<u64>(+vm::g_reservations), args[0]));
 
 	// Alloc args[0] to stamp0
 	const auto stamp0 = args[0];
@@ -853,7 +854,7 @@ const auto spu_getllar_tx = built_function<u64(*)(u32 raddr, void* rdata, cpu_th
 	// Check pause flag
 	c.bt(x86::dword_ptr(args[2], ::offset32(&cpu_thread::state)), static_cast<u32>(cpu_flag::pause));
 	c.jc(fall);
-	c.mov(x86::rax, x86::qword_ptr(x86::rbx));
+	c.mov(x86::rax, x86::qword_ptr(x86::r11));
 	c.and_(x86::rax, -128);
 	c.cmp(x86::rax, args[3]);
 	c.jne(fall);
@@ -862,10 +863,10 @@ const auto spu_getllar_tx = built_function<u64(*)(u32 raddr, void* rdata, cpu_th
 	// Just read data to registers
 	if (s_tsx_avx)
 	{
-		c.vmovups(x86::ymm0, x86::yword_ptr(x86::rbp, 0));
-		c.vmovups(x86::ymm1, x86::yword_ptr(x86::rbp, 32));
-		c.vmovups(x86::ymm2, x86::yword_ptr(x86::rbp, 64));
-		c.vmovups(x86::ymm3, x86::yword_ptr(x86::rbp, 96));
+		c.vmovups(x86::ymm0, x86::ymmword_ptr(x86::rbp, 0));
+		c.vmovups(x86::ymm1, x86::ymmword_ptr(x86::rbp, 32));
+		c.vmovups(x86::ymm2, x86::ymmword_ptr(x86::rbp, 64));
+		c.vmovups(x86::ymm3, x86::ymmword_ptr(x86::rbp, 96));
 	}
 	else
 	{
@@ -887,10 +888,10 @@ const auto spu_getllar_tx = built_function<u64(*)(u32 raddr, void* rdata, cpu_th
 	// Store data
 	if (s_tsx_avx)
 	{
-		c.vmovaps(x86::yword_ptr(args[1], 0), x86::ymm0);
-		c.vmovaps(x86::yword_ptr(args[1], 32), x86::ymm1);
-		c.vmovaps(x86::yword_ptr(args[1], 64), x86::ymm2);
-		c.vmovaps(x86::yword_ptr(args[1], 96), x86::ymm3);
+		c.vmovaps(x86::ymmword_ptr(args[1], 0), x86::ymm0);
+		c.vmovaps(x86::ymmword_ptr(args[1], 32), x86::ymm1);
+		c.vmovaps(x86::ymmword_ptr(args[1], 64), x86::ymm2);
+		c.vmovaps(x86::ymmword_ptr(args[1], 96), x86::ymm3);
 	}
 	else
 	{
@@ -926,9 +927,16 @@ const auto spu_getllar_tx = built_function<u64(*)(u32 raddr, void* rdata, cpu_th
 
 	c.add(x86::rsp, 40);
 	c.pop(x86::rbx);
-	c.pop(x86::r12);
-	c.pop(x86::r13);
 	c.pop(x86::rbp);
+
+#ifdef __linux__
+	// Hack for perf profiling (TODO)
+	Label ret2 = c.newLabel();
+	c.lea(x86::rdx, x86::qword_ptr(ret2));
+	c.push(x86::rdx);
+	c.push(x86::rdx);
+	c.bind(ret2);
+#endif
 	c.ret();
 });
 
@@ -2242,32 +2250,41 @@ void spu_thread::do_dma_transfer(spu_thread* _this, const spu_mfc_cmd& args, u8*
 				// Split locking + transfer in two parts (before 64K border, and after it)
 				vm::range_lock(range_lock, range_addr, size0);
 
-				// Avoid unaligned stores in mov_rdata_avx
-				if (reinterpret_cast<u64>(dst) & 0x10)
+				if (size > s_rep_movsb_threshold)
 				{
-					*reinterpret_cast<v128*>(dst) = *reinterpret_cast<const v128*>(src);
-
-					dst += 16;
-					src += 16;
-					size0 -= 16;
+					__movsb(dst, src, size0);
+					dst += size0;
+					src += size0;
 				}
-
-				while (size0 >= 128)
+				else
 				{
-					mov_rdata(*reinterpret_cast<spu_rdata_t*>(dst), *reinterpret_cast<const spu_rdata_t*>(src));
+					// Avoid unaligned stores in mov_rdata_avx
+					if (reinterpret_cast<u64>(dst) & 0x10)
+					{
+						*reinterpret_cast<v128*>(dst) = *reinterpret_cast<const v128*>(src);
 
-					dst += 128;
-					src += 128;
-					size0 -= 128;
-				}
+						dst += 16;
+						src += 16;
+						size0 -= 16;
+					}
 
-				while (size0)
-				{
-					*reinterpret_cast<v128*>(dst) = *reinterpret_cast<const v128*>(src);
+					while (size0 >= 128)
+					{
+						mov_rdata(*reinterpret_cast<spu_rdata_t*>(dst), *reinterpret_cast<const spu_rdata_t*>(src));
 
-					dst += 16;
-					src += 16;
-					size0 -= 16;
+						dst += 128;
+						src += 128;
+						size0 -= 128;
+					}
+
+					while (size0)
+					{
+						*reinterpret_cast<v128*>(dst) = *reinterpret_cast<const v128*>(src);
+
+						dst += 16;
+						src += 16;
+						size0 -= 16;
+					}
 				}
 
 				range_lock->release(0);
@@ -2276,32 +2293,39 @@ void spu_thread::do_dma_transfer(spu_thread* _this, const spu_mfc_cmd& args, u8*
 
 			vm::range_lock(range_lock, range_addr, range_end - range_addr);
 
-			// Avoid unaligned stores in mov_rdata_avx
-			if (reinterpret_cast<u64>(dst) & 0x10)
+			if (size > s_rep_movsb_threshold)
 			{
-				*reinterpret_cast<v128*>(dst) = *reinterpret_cast<const v128*>(src);
-
-				dst += 16;
-				src += 16;
-				size -= 16;
+				__movsb(dst, src, size);
 			}
-
-			while (size >= 128)
+			else
 			{
-				mov_rdata(*reinterpret_cast<spu_rdata_t*>(dst), *reinterpret_cast<const spu_rdata_t*>(src));
+				// Avoid unaligned stores in mov_rdata_avx
+				if (reinterpret_cast<u64>(dst) & 0x10)
+				{
+					*reinterpret_cast<v128*>(dst) = *reinterpret_cast<const v128*>(src);
 
-				dst += 128;
-				src += 128;
-				size -= 128;
-			}
+					dst += 16;
+					src += 16;
+					size -= 16;
+				}
 
-			while (size)
-			{
-				*reinterpret_cast<v128*>(dst) = *reinterpret_cast<const v128*>(src);
+				while (size >= 128)
+				{
+					mov_rdata(*reinterpret_cast<spu_rdata_t*>(dst), *reinterpret_cast<const spu_rdata_t*>(src));
 
-				dst += 16;
-				src += 16;
-				size -= 16;
+					dst += 128;
+					src += 128;
+					size -= 128;
+				}
+
+				while (size)
+				{
+					*reinterpret_cast<v128*>(dst) = *reinterpret_cast<const v128*>(src);
+
+					dst += 16;
+					src += 16;
+					size -= 16;
+				}
 			}
 
 			range_lock->release(0);
@@ -2346,32 +2370,39 @@ plain_access:
 	}
 	default:
 	{
-		// Avoid unaligned stores in mov_rdata_avx
-		if (reinterpret_cast<u64>(dst) & 0x10)
+		if (size > s_rep_movsb_threshold)
 		{
-			*reinterpret_cast<v128*>(dst) = *reinterpret_cast<const v128*>(src);
-
-			dst += 16;
-			src += 16;
-			size -= 16;
+			__movsb(dst, src, size);
 		}
-
-		while (size >= 128)
+		else
 		{
-			mov_rdata(*reinterpret_cast<spu_rdata_t*>(dst), *reinterpret_cast<const spu_rdata_t*>(src));
+			// Avoid unaligned stores in mov_rdata_avx
+			if (reinterpret_cast<u64>(dst) & 0x10)
+			{
+				*reinterpret_cast<v128*>(dst) = *reinterpret_cast<const v128*>(src);
 
-			dst += 128;
-			src += 128;
-			size -= 128;
-		}
+				dst += 16;
+				src += 16;
+				size -= 16;
+			}
 
-		while (size)
-		{
-			*reinterpret_cast<v128*>(dst) = *reinterpret_cast<const v128*>(src);
+			while (size >= 128)
+			{
+				mov_rdata(*reinterpret_cast<spu_rdata_t*>(dst), *reinterpret_cast<const spu_rdata_t*>(src));
 
-			dst += 16;
-			src += 16;
-			size -= 16;
+				dst += 128;
+				src += 128;
+				size -= 128;
+			}
+
+			while (size)
+			{
+				*reinterpret_cast<v128*>(dst) = *reinterpret_cast<const v128*>(src);
+
+				dst += 16;
+				src += 16;
+				size -= 16;
+			}
 		}
 
 		break;

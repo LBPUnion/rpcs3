@@ -10,30 +10,32 @@
 #include "emmintrin.h"
 #include "immintrin.h"
 
-#define DEBUG_VERTEX_STREAMING 0
-
 #if !defined(_MSC_VER) && defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wold-style-cast"
 #endif
 
 #if defined(_MSC_VER)
+#define PLAIN_FUNC
 #define SSSE3_FUNC
 #define SSE4_1_FUNC
 #define AVX2_FUNC
+#define AVX3_FUNC
 #else
+#ifndef __clang__
+#define PLAIN_FUNC __attribute__((optimize("no-tree-vectorize")))
+#define SSSE3_FUNC __attribute__((__target__("ssse3"))) __attribute__((optimize("tree-vectorize")))
+#else
+#define PLAIN_FUNC
 #define SSSE3_FUNC __attribute__((__target__("ssse3")))
+#endif
 #define SSE4_1_FUNC __attribute__((__target__("sse4.1")))
 #define AVX2_FUNC __attribute__((__target__("avx2")))
+#define AVX3_FUNC __attribute__((__target__("avx512f,avx512bw,avx512dq,avx512cd,avx512vl")))
 #ifndef __AVX2__
 using __m256i = long long __attribute__((vector_size(32)));
 #endif
 #endif // _MSC_VER
-
-SSSE3_FUNC static inline __m128i ssse3_shuffle_epi8(__m128i x, __m128i y)
-{
-	return _mm_shuffle_epi8(x, y);
-}
 
 SSE4_1_FUNC static inline u16 sse41_hmin_epu16(__m128i x)
 {
@@ -45,22 +47,31 @@ SSE4_1_FUNC static inline u16 sse41_hmax_epu16(__m128i x)
 	return ~_mm_cvtsi128_si32(_mm_minpos_epu16(_mm_xor_si128(x, _mm_set1_epi32(-1))));
 }
 
-#if defined(__AVX2__)
+#if defined(__AVX512F__) && defined(__AVX512VL__) && defined(__AVX512DQ__) && defined(__AVX512CD__) && defined(__AVX512BW__)
 constexpr bool s_use_ssse3 = true;
 constexpr bool s_use_sse4_1 = true;
 constexpr bool s_use_avx2 = true;
+constexpr bool s_use_avx3 = true;
+#elif defined(__AVX2__)
+constexpr bool s_use_ssse3 = true;
+constexpr bool s_use_sse4_1 = true;
+constexpr bool s_use_avx2 = true;
+constexpr bool s_use_avx3 = false;
 #elif defined(__SSE41__)
 constexpr bool s_use_ssse3 = true;
 constexpr bool s_use_sse4_1 = true;
 constexpr bool s_use_avx2 = false;
+constexpr bool s_use_avx3 = false;
 #elif defined(__SSSE3__)
 constexpr bool s_use_ssse3 = true;
 constexpr bool s_use_sse4_1 = false;
 constexpr bool s_use_avx2 = false;
+constexpr bool s_use_avx3 = false;
 #else
 const bool s_use_ssse3 = utils::has_ssse3();
 const bool s_use_sse4_1 = utils::has_sse41();
 const bool s_use_avx2 = utils::has_avx2();
+const bool s_use_avx3 = utils::has_avx512();
 #endif
 
 const __m128i s_bswap_u32_mask = _mm_set_epi8(
@@ -86,711 +97,168 @@ namespace utils
 
 namespace
 {
-	/**
-	 * Convert CMP vector to RGBA16.
-	 * A vector in CMP (compressed) format is stored as X11Y11Z10 and has a W component of 1.
-	 * X11 and Y11 channels are int between -1024 and 1023 interpreted as -1.f, 1.f
-	 * Z10 is int between -512 and 511 interpreted as -1.f, 1.f
-	 */
-	std::array<u16, 4> decode_cmp_vector(u32 encoded_vector)
+	template <bool Compare>
+	PLAIN_FUNC bool copy_data_swap_u32_naive(u32* dst, const u32* src, u32 count)
 	{
-		u16 Z = encoded_vector >> 22;
-		Z = Z << 6;
-		u16 Y = (encoded_vector >> 11) & 0x7FF;
-		Y = Y << 5;
-		u16 X = encoded_vector & 0x7FF;
-		X = X << 5;
-		return{ X, Y, Z, 1 };
-	}
-}
-
-template <bool Compare>
-AVX2_FUNC inline bool copy_data_swap_u32_avx2(void*& dst, const void*& src, u32 count)
-{
-	const __m256i bswap_u32_mask = _mm256_set_m128i(s_bswap_u32_mask, s_bswap_u32_mask);
-
-	__m128i diff0 = _mm_setzero_si128();
-	__m256i diff = _mm256_setzero_si256();
-
-	if (uptr(dst) & 16 && count >= 4)
-	{
-		const auto dst0 = static_cast<__m128i*>(dst);
-		const auto src0 = static_cast<const __m128i*>(src);
-		const auto data = _mm_shuffle_epi8(_mm_loadu_si128(src0), s_bswap_u32_mask);
-
-		if (Compare)
-		{
-			diff0 = _mm_xor_si128(data, _mm_load_si128(dst0));
-		}
-
-		_mm_store_si128(dst0, data);
-		dst = dst0 + 1;
-		src = src0 + 1;
-		count -= 4;
-	}
-
-	const u32 lane_count = count / 8;
-
-	auto dst_ptr = static_cast<__m256i*>(dst);
-	auto src_ptr = static_cast<const __m256i*>(src);
+		u32 result = 0;
 
 #ifdef __clang__
-#pragma clang loop unroll(disable)
+		#pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
 #endif
-	for (u32 i = 0; i < lane_count; ++i)
-	{
-		const __m256i vec0 = _mm256_loadu_si256(src_ptr + i);
-		const __m256i vec1 = _mm256_shuffle_epi8(vec0, bswap_u32_mask);
-
-		if constexpr (Compare)
+		for (u32 i = 0; i < count; i++)
 		{
-			diff = _mm256_or_si256(diff, _mm256_xor_si256(vec1, _mm256_load_si256(dst_ptr + i)));
+			const u32 data = stx::se_storage<u32>::swap(src[i]);
+
+			if constexpr (Compare)
+			{
+				result |= data ^ dst[i];
+			}
+
+			dst[i] = data;
 		}
 
-		_mm256_store_si256(dst_ptr + i, vec1);
+		return static_cast<bool>(result);
 	}
 
-	dst = dst_ptr + lane_count;
-	src = src_ptr + lane_count;
-
-	if (count & 4)
+	template <bool Compare>
+	SSSE3_FUNC bool copy_data_swap_u32_ssse3(u32* dst, const u32* src, u32 count)
 	{
-		const auto dst0 = static_cast<__m128i*>(dst);
-		const auto src0 = static_cast<const __m128i*>(src);
-		const auto data = _mm_shuffle_epi8(_mm_loadu_si128(src0), s_bswap_u32_mask);
+		u32 result = 0;
+
+#ifdef __clang__
+		#pragma clang loop vectorize(enable) interleave(disable) unroll(disable)
+#endif
+		for (u32 i = 0; i < count; i++)
+		{
+			const u32 data = stx::se_storage<u32>::swap(src[i]);
+
+			if constexpr (Compare)
+			{
+				result |= data ^ dst[i];
+			}
+
+			dst[i] = data;
+		}
+
+		return static_cast<bool>(result);
+	}
+
+	template <bool Compare, int Size, typename RT>
+	void build_copy_data_swap_u32_avx3(asmjit::x86::Assembler& c, std::array<asmjit::x86::Gp, 4>& args, const RT& rmask, const RT& rload, const RT& rtest)
+	{
+		using namespace asmjit;
+
+		Label loop = c.newLabel();
+		Label tail = c.newLabel();
+
+		// Get start alignment offset
+		c.mov(args[3].r32(), args[0].r32());
+		c.and_(args[3].r32(), Size * 4 - 1);
+
+		// Load and duplicate shuffle mask
+		c.vbroadcasti32x4(rmask, x86::oword_ptr(uptr(&s_bswap_u32_mask)));
+		if (Compare)
+			c.vpxor(x86::xmm2, x86::xmm2, x86::xmm2);
+
+		c.or_(x86::eax, -1);
+		// Small data: skip to tail (ignore alignment)
+		c.cmp(args[2].r32(), Size);
+		c.jbe(tail);
+
+		// Generate mask for first iteration, adjust args using alignment offset
+		c.sub(args[1], args[3]);
+		c.shr(args[3].r32(), 2);
+		c.shlx(x86::eax, x86::eax, args[3].r32());
+		c.kmovw(x86::k1, x86::eax);
+		c.and_(args[0], -Size * 4);
+		c.add(args[2].r32(), args[3].r32());
+
+		c.k(x86::k1).z().vmovdqu32(rload, x86::Mem(args[1], 0, Size * 4u));
+		c.vpshufb(rload, rload, rmask);
+		if (Compare)
+			c.k(x86::k1).z().vpxord(rtest, rload, x86::Mem(args[0], 0, Size * 4u));
+		c.k(x86::k1).vmovdqa32(x86::Mem(args[0], 0, Size * 4u), rload);
+		c.lea(args[0], x86::qword_ptr(args[0], Size * 4));
+		c.lea(args[1], x86::qword_ptr(args[1], Size * 4));
+		c.sub(args[2].r32(), Size);
+
+		c.or_(x86::eax, -1);
+		c.align(AlignMode::kCode, 16);
+
+		c.bind(loop);
+		c.cmp(args[2].r32(), Size);
+		c.jbe(tail);
+		c.vmovdqu32(rload, x86::Mem(args[1], 0, Size * 4u));
+		c.vpshufb(rload, rload, rmask);
+		if (Compare)
+			c.vpternlogd(rtest, rload, x86::Mem(args[0], 0, Size * 4u), 0xf6); // orAxorBC
+		c.vmovdqa32(x86::Mem(args[0], 0, Size * 4u), rload);
+		c.lea(args[0], x86::qword_ptr(args[0], Size * 4));
+		c.lea(args[1], x86::qword_ptr(args[1], Size * 4));
+		c.sub(args[2].r32(), Size);
+		c.jmp(loop);
+
+		c.bind(tail);
+		c.shlx(x86::eax, x86::eax, args[2].r32());
+		c.not_(x86::eax);
+		c.kmovw(x86::k1, x86::eax);
+		c.k(x86::k1).z().vmovdqu32(rload, x86::Mem(args[1], 0, Size * 4u));
+		c.vpshufb(rload, rload, rmask);
+		if (Compare)
+			c.k(x86::k1).vpternlogd(rtest, rload, x86::Mem(args[0], 0, Size * 4u), 0xf6);
+		c.k(x86::k1).vmovdqu32(x86::Mem(args[0], 0, Size * 4u), rload);
 
 		if (Compare)
 		{
-			diff0 = _mm_or_si128(diff0, _mm_xor_si128(data, _mm_load_si128(dst0)));
-		}
-
-		_mm_store_si128(dst0, data);
-		dst = dst0 + 1;
-		src = src0 + 1;
-	}
-
-	if constexpr (Compare)
-	{
-		diff = _mm256_or_si256(diff, _mm256_set_m128i(_mm_setzero_si128(), diff0));
-		return !_mm256_testz_si256(diff, diff);
-	}
-	else
-	{
-		return false;
-	}
-}
-
-template <bool Compare>
-static auto copy_data_swap_u32(void* dst, const void* src, u32 count)
-{
-	bool result = false;
-
-	if (uptr(dst) & 4)
-	{
-		const auto dst0 = static_cast<u32*>(dst);
-		const auto src0 = static_cast<const u32*>(src);
-		const u32 data = stx::se_storage<u32>::swap(*src0);
-
-		if (Compare && *dst0 != data)
-		{
-			result = true;
-		}
-
-		*dst0 = data;
-		dst = dst0 + 1;
-		src = src0 + 1;
-		count--;
-	}
-
-	if (uptr(dst) & 8 && count >= 2)
-	{
-		const auto dst0 = static_cast<u64*>(dst);
-		const auto src0 = static_cast<const u64*>(src);
-		const u64 data = utils::rol64(stx::se_storage<u64>::swap(*src0), 32);
-
-		if (Compare && *dst0 != data)
-		{
-			result = true;
-		}
-
-		*dst0 = data;
-		dst = dst0 + 1;
-		src = src0 + 1;
-		count -= 2;
-	}
-
-	const u32 lane_count = count / 4;
-
-	if (s_use_avx2) [[likely]]
-	{
-		result |= copy_data_swap_u32_avx2<Compare>(dst, src, count);
-	}
-	else if (s_use_ssse3)
-	{
-		__m128i diff = _mm_setzero_si128();
-
-		auto dst_ptr = static_cast<__m128i*>(dst);
-		auto src_ptr = static_cast<const __m128i*>(src);
-
-		for (u32 i = 0; i < lane_count; ++i)
-		{
-			const __m128i vec0 = _mm_loadu_si128(src_ptr + i);
-			const __m128i vec1 = ssse3_shuffle_epi8(vec0, s_bswap_u32_mask);
-
-			if constexpr (Compare)
+			if constexpr (Size != 16)
 			{
-				diff = _mm_or_si128(diff, _mm_xor_si128(vec1, _mm_load_si128(dst_ptr + i)));
+				c.vptest(rtest, rtest);
 			}
-
-			_mm_store_si128(dst_ptr + i, vec1);
-		}
-
-		result |= _mm_cvtsi128_si64(_mm_packs_epi32(diff, diff)) != 0;
-
-		dst = dst_ptr + lane_count;
-		src = src_ptr + lane_count;
-	}
-	else
-	{
-		__m128i diff = _mm_setzero_si128();
-
-		auto dst_ptr = static_cast<__m128i*>(dst);
-		auto src_ptr = static_cast<const __m128i*>(src);
-
-		for (u32 i = 0; i < lane_count; ++i)
-		{
-			const __m128i vec0 = _mm_loadu_si128(src_ptr + i);
-			const __m128i vec1 = _mm_or_si128(_mm_slli_epi16(vec0, 8), _mm_srli_epi16(vec0, 8));
-			const __m128i vec2 = _mm_or_si128(_mm_slli_epi32(vec1, 16), _mm_srli_epi32(vec1, 16));
-
-			if constexpr (Compare)
-			{
-				diff = _mm_or_si128(diff, _mm_xor_si128(vec2, _mm_load_si128(dst_ptr + i)));
-			}
-
-			_mm_store_si128(dst_ptr + i, vec2);
-		}
-
-		result |= _mm_cvtsi128_si64(_mm_packs_epi32(diff, diff)) != 0;
-
-		dst = dst_ptr + lane_count;
-		src = src_ptr + lane_count;
-	}
-
-	if (count & 2)
-	{
-		const auto dst0 = static_cast<u64*>(dst);
-		const auto src0 = static_cast<const u64*>(src);
-		const u64 data = utils::rol64(stx::se_storage<u64>::swap(*src0), 32);
-
-		if (Compare && *dst0 != data)
-		{
-			result = true;
-		}
-
-		*dst0 = data;
-		dst = dst0 + 1;
-		src = src0 + 1;
-	}
-
-	if (count & 1)
-	{
-		const auto dst0 = static_cast<u32*>(dst);
-		const auto src0 = static_cast<const u32*>(src);
-		const u32 data = stx::se_storage<u32>::swap(*src0);
-
-		if (Compare && *dst0 != data)
-		{
-			result = true;
-		}
-
-		*dst0 = data;
-	}
-
-	if constexpr (Compare)
-	{
-		return result;
-	}
-}
-
-bool copy_data_swap_u32_cmp(void* dst, const void* src, u32 count)
-{
-	return copy_data_swap_u32<true>(dst, src, count);
-}
-
-void copy_data_swap_u32(void* dst, const void* src, u32 count)
-{
-	copy_data_swap_u32<false>(dst, src, count);
-}
-
-namespace
-{
-	inline void stream_data_to_memory_swapped_u32(void *dst, const void *src, u32 vertex_count, u8 stride)
-	{
-		auto dst_ptr = static_cast<__m128i*>(dst);
-		auto src_ptr = static_cast<const __m128i*>(src);
-
-		const u32 dword_count = (vertex_count * (stride >> 2));
-		const u32 iterations = dword_count >> 2;
-		const u32 remaining = dword_count % 4;
-
-		if (s_use_ssse3) [[likely]]
-		{
-			for (u32 i = 0; i < iterations; ++i)
-			{
-				const __m128i vector = _mm_loadu_si128(src_ptr);
-				const __m128i shuffled_vector = ssse3_shuffle_epi8(vector, s_bswap_u32_mask);
-				_mm_stream_si128(dst_ptr, shuffled_vector);
-
-				src_ptr++;
-				dst_ptr++;
-			}
-		}
-		else
-		{
-			for (u32 i = 0; i < iterations; ++i)
-			{
-				const __m128i vec0 = _mm_loadu_si128(src_ptr);
-				const __m128i vec1 = _mm_or_si128(_mm_slli_epi16(vec0, 8), _mm_srli_epi16(vec0, 8));
-				const __m128i vec2 = _mm_or_si128(_mm_slli_epi32(vec1, 16), _mm_srli_epi32(vec1, 16));
-				_mm_stream_si128(dst_ptr, vec2);
-
-				src_ptr++;
-				dst_ptr++;
-			}
-		}
-
-		if (remaining)
-		{
-			const auto src_ptr2 = utils::bless<const se_t<u32, true, 1>>(src_ptr);
-			const auto dst_ptr2 = utils::bless<nse_t<u32, 1>>(dst_ptr);
-
-			for (u32 i = 0; i < remaining; ++i)
-				dst_ptr2[i] = src_ptr2[i];
-		}
-	}
-
-	inline void stream_data_to_memory_swapped_u16(void *dst, const void *src, u32 vertex_count, u8 stride)
-	{
-		auto dst_ptr = static_cast<__m128i*>(dst);
-		auto src_ptr = static_cast<const __m128i*>(src);
-
-		const u32 word_count = (vertex_count * (stride >> 1));
-		const u32 iterations = word_count >> 3;
-		const u32 remaining = word_count % 8;
-
-		if (s_use_ssse3) [[likely]]
-		{
-			for (u32 i = 0; i < iterations; ++i)
-			{
-				const __m128i vector = _mm_loadu_si128(src_ptr);
-				const __m128i shuffled_vector = ssse3_shuffle_epi8(vector, s_bswap_u16_mask);
-				_mm_stream_si128(dst_ptr, shuffled_vector);
-
-				src_ptr++;
-				dst_ptr++;
-			}
-		}
-		else
-		{
-			for (u32 i = 0; i < iterations; ++i)
-			{
-				const __m128i vec0 = _mm_loadu_si128(src_ptr);
-				const __m128i vec1 = _mm_or_si128(_mm_slli_epi16(vec0, 8), _mm_srli_epi16(vec0, 8));
-				_mm_stream_si128(dst_ptr, vec1);
-
-				src_ptr++;
-				dst_ptr++;
-			}
-		}
-
-		if (remaining)
-		{
-			auto src_ptr2 = utils::bless<const se_t<u16, true, 1>>(src_ptr);
-			auto dst_ptr2 = utils::bless<nse_t<u16, 1>>(dst_ptr);
-
-			for (u32 i = 0; i < remaining; ++i)
-				dst_ptr2[i] = src_ptr2[i];
-		}
-	}
-
-	inline void stream_data_to_memory_swapped_u32_non_continuous(void *dst, const void *src, u32 vertex_count, u8 dst_stride, u8 src_stride)
-	{
-		auto src_ptr = static_cast<const char*>(src);
-		auto dst_ptr = static_cast<char*>(dst);
-
-		//Count vertices to copy
-		const bool is_128_aligned = !((dst_stride | src_stride) & 15);
-
-		u32 min_block_size = std::min(src_stride, dst_stride);
-		if (min_block_size == 0) min_block_size = dst_stride;
-
-		u32 iterations = 0;
-		u32 remainder = is_128_aligned ? 0 : 1 + ((16 - min_block_size) / min_block_size);
-
-		if (vertex_count > remainder)
-			iterations = vertex_count - remainder;
-		else
-			remainder = vertex_count;
-
-		if (s_use_ssse3) [[likely]]
-		{
-			for (u32 i = 0; i < iterations; ++i)
-			{
-				const __m128i vector = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src_ptr));
-				const __m128i shuffled_vector = ssse3_shuffle_epi8(vector, s_bswap_u32_mask);
-				_mm_storeu_si128(reinterpret_cast<__m128i*>(dst_ptr), shuffled_vector);
-
-				src_ptr += src_stride;
-				dst_ptr += dst_stride;
-			}
-		}
-		else
-		{
-			for (u32 i = 0; i < iterations; ++i)
-			{
-				const __m128i vec0 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src_ptr));
-				const __m128i vec1 = _mm_or_si128(_mm_slli_epi16(vec0, 8), _mm_srli_epi16(vec0, 8));
-				const __m128i vec2 = _mm_or_si128(_mm_slli_epi32(vec1, 16), _mm_srli_epi32(vec1, 16));
-				_mm_storeu_si128(reinterpret_cast<__m128i*>(dst_ptr), vec2);
-
-				src_ptr += src_stride;
-				dst_ptr += dst_stride;
-			}
-		}
-
-		if (remainder)
-		{
-			const u8 attribute_sz = min_block_size >> 2;
-			for (u32 n = 0; n < remainder; ++n)
-			{
-				auto src_ptr2 = utils::bless<const be_t<u32>>(src_ptr);
-				auto dst_ptr2 = utils::bless<u32>(dst_ptr);
-
-				for (u32 v = 0; v < attribute_sz; ++v)
-					dst_ptr2[v] = src_ptr2[v];
-
-				src_ptr += src_stride;
-				dst_ptr += dst_stride;
-			}
-		}
-	}
-
-	inline void stream_data_to_memory_swapped_u16_non_continuous(void *dst, const void *src, u32 vertex_count, u8 dst_stride, u8 src_stride)
-	{
-		auto src_ptr = static_cast<const char*>(src);
-		auto dst_ptr = static_cast<char*>(dst);
-
-		const bool is_128_aligned = !((dst_stride | src_stride) & 15);
-
-		u32 min_block_size = std::min(src_stride, dst_stride);
-		if (min_block_size == 0) min_block_size = dst_stride;
-
-		u32 iterations = 0;
-		u32 remainder = is_128_aligned ? 0 : 1 + ((16 - min_block_size) / min_block_size);
-
-		if (vertex_count > remainder)
-			iterations = vertex_count - remainder;
-		else
-			remainder = vertex_count;
-
-		if (s_use_ssse3) [[likely]]
-		{
-			for (u32 i = 0; i < iterations; ++i)
-			{
-				const __m128i vector = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src_ptr));
-				const __m128i shuffled_vector = ssse3_shuffle_epi8(vector, s_bswap_u16_mask);
-				_mm_storeu_si128(reinterpret_cast<__m128i*>(dst_ptr), shuffled_vector);
-
-				src_ptr += src_stride;
-				dst_ptr += dst_stride;
-			}
-		}
-		else
-		{
-			for (u32 i = 0; i < iterations; ++i)
-			{
-				const __m128i vec0 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src_ptr));
-				const __m128i vec1 = _mm_or_si128(_mm_slli_epi16(vec0, 8), _mm_srli_epi16(vec0, 8));
-				_mm_storeu_si128(reinterpret_cast<__m128i*>(dst_ptr), vec1);
-
-				src_ptr += src_stride;
-				dst_ptr += dst_stride;
-			}
-		}
-
-		if (remainder)
-		{
-			const u8 attribute_sz = min_block_size >> 1;
-			for (u32 n = 0; n < remainder; ++n)
-			{
-				auto src_ptr2 = utils::bless<const be_t<u16>>(src_ptr);
-				auto dst_ptr2 = utils::bless<u16>(dst_ptr);
-
-				for (u32 v = 0; v < attribute_sz; ++v)
-					dst_ptr2[v] = src_ptr2[v];
-
-				src_ptr += src_stride;
-				dst_ptr += dst_stride;
-			}
-		}
-	}
-
-	inline void stream_data_to_memory_u8_non_continuous(void *dst, const void *src, u32 vertex_count, u8 attribute_size, u8 dst_stride, u8 src_stride)
-	{
-		auto src_ptr = static_cast<const char*>(src);
-		auto dst_ptr = static_cast<char*>(dst);
-
-		switch (attribute_size)
-		{
-			case 4:
-			{
-				//Read one dword every iteration
-				for (u32 vertex = 0; vertex < vertex_count; ++vertex)
-				{
-					*reinterpret_cast<u32*>(dst_ptr) = *reinterpret_cast<const u32*>(src_ptr);
-
-					dst_ptr += dst_stride;
-					src_ptr += src_stride;
-				}
-
-				break;
-			}
-			case 3:
-			{
-				//Read one word and one byte
-				for (u32 vertex = 0; vertex < vertex_count; ++vertex)
-				{
-					*reinterpret_cast<u16*>(dst_ptr) = *reinterpret_cast<const u16*>(src_ptr);
-					dst_ptr[2] = src_ptr[2];
-
-					dst_ptr += dst_stride;
-					src_ptr += src_stride;
-				}
-
-				break;
-			}
-			case 2:
-			{
-				//Copy u16 blocks
-				for (u32 vertex = 0; vertex < vertex_count; ++vertex)
-				{
-					*reinterpret_cast<u16*>(dst_ptr) = *reinterpret_cast<const u16*>(src_ptr);
-
-					dst_ptr += dst_stride;
-					src_ptr += src_stride;
-				}
-
-				break;
-			}
-			case 1:
-			{
-				for (u32 vertex = 0; vertex < vertex_count; ++vertex)
-				{
-					dst_ptr[0] = src_ptr[0];
-
-					dst_ptr += dst_stride;
-					src_ptr += src_stride;
-				}
-
-				break;
-			}
-		}
-	}
-
-	template <typename T, typename U, int N>
-	void copy_whole_attribute_array_impl(void* raw_dst, const void* raw_src, u8 dst_stride, u32 src_stride, u32 vertex_count)
-	{
-		auto src_ptr = static_cast<const char*>(raw_src);
-		auto dst_ptr = static_cast<char*>(raw_dst);
-
-		for (u32 vertex = 0; vertex < vertex_count; ++vertex)
-		{
-			auto typed_dst = reinterpret_cast<T*>(dst_ptr);
-			auto typed_src = reinterpret_cast<const U*>(src_ptr);
-
-			for (u32 i = 0; i < N; ++i)
-			{
-				typed_dst[i] = typed_src[i];
-			}
-
-			src_ptr += src_stride;
-			dst_ptr += dst_stride;
-		}
-	}
-
-	/*
-	 * Copies a number of src vertices, repeated over and over to fill the dst
-	 * e.g repeat 2 vertices over a range of 16 verts, so 8 reps
-	 */
-	template <typename T, typename U, int N>
-	void copy_whole_attribute_array_repeating_impl(void* raw_dst, const void* raw_src, const u8 dst_stride, const u32 src_stride, const u32 vertex_count, const u32 src_vertex_count)
-	{
-		auto src_ptr = static_cast<const char*>(raw_src);
-		auto dst_ptr = static_cast<char*>(raw_dst);
-
-		u32 src_offset = 0;
-		u32 src_limit = src_stride * src_vertex_count;
-
-		for (u32 vertex = 0; vertex < vertex_count; ++vertex)
-		{
-			auto typed_dst = reinterpret_cast<T*>(dst_ptr);
-			auto typed_src = reinterpret_cast<const U*>(src_ptr + src_offset);
-
-			for (u32 i = 0; i < N; ++i)
-			{
-				typed_dst[i] = typed_src[i];
-			}
-
-			src_offset = (src_offset + src_stride) % src_limit;
-			dst_ptr += dst_stride;
-		}
-	}
-
-	template <typename U, typename T>
-	void copy_whole_attribute_array(void* raw_dst, const void* raw_src, const u8 attribute_size, const u8 dst_stride, const u32 src_stride, const u32 vertex_count, const u32 src_vertex_count)
-	{
-		//Eliminate the inner loop by templating the inner loop counter N
-
-		if (src_vertex_count == vertex_count)
-		{
-			switch (attribute_size)
-			{
-			case 1:
-				copy_whole_attribute_array_impl<U, T, 1>(raw_dst, raw_src, dst_stride, src_stride, vertex_count);
-				break;
-			case 2:
-				copy_whole_attribute_array_impl<U, T, 2>(raw_dst, raw_src, dst_stride, src_stride, vertex_count);
-				break;
-			case 3:
-				copy_whole_attribute_array_impl<U, T, 3>(raw_dst, raw_src, dst_stride, src_stride, vertex_count);
-				break;
-			case 4:
-				copy_whole_attribute_array_impl<U, T, 4>(raw_dst, raw_src, dst_stride, src_stride, vertex_count);
-				break;
-			}
-		}
-		else
-		{
-			switch (attribute_size)
-			{
-			case 1:
-				copy_whole_attribute_array_repeating_impl<U, T, 1>(raw_dst, raw_src, dst_stride, src_stride, vertex_count, src_vertex_count);
-				break;
-			case 2:
-				copy_whole_attribute_array_repeating_impl<U, T, 2>(raw_dst, raw_src, dst_stride, src_stride, vertex_count, src_vertex_count);
-				break;
-			case 3:
-				copy_whole_attribute_array_repeating_impl<U, T, 3>(raw_dst, raw_src, dst_stride, src_stride, vertex_count, src_vertex_count);
-				break;
-			case 4:
-				copy_whole_attribute_array_repeating_impl<U, T, 4>(raw_dst, raw_src, dst_stride, src_stride, vertex_count, src_vertex_count);
-				break;
-			}
-		}
-	}
-}
-
-void write_vertex_array_data_to_buffer(std::span<std::byte> raw_dst_span, std::span<const std::byte> src_ptr, u32 count, rsx::vertex_base_type type, u32 vector_element_count, u32 attribute_src_stride, u8 dst_stride, bool swap_endianness)
-{
-	ensure((vector_element_count > 0));
-	const u32 src_read_stride = rsx::get_vertex_type_size_on_host(type, vector_element_count);
-
-	bool use_stream_no_stride = false;
-	bool use_stream_with_stride = false;
-
-	//If stride is not defined, we have a packed array
-	if (attribute_src_stride == 0) attribute_src_stride = src_read_stride;
-
-	//Sometimes, we get a vertex attribute to be repeated. Just copy the supplied vertices only
-	//TODO: Stop these requests from getting here in the first place!
-	//TODO: Check if it is possible to have a repeating array with more than one attribute instance
-	const u32 real_count = static_cast<u32>(src_ptr.size_bytes()) / attribute_src_stride;
-	if (real_count == 1) attribute_src_stride = 0;	//Always fetch src[0]
-
-	//TODO: Determine favourable vertex threshold where vector setup costs become negligible
-	//Tests show that even with 4 vertices, using traditional bswap is significantly slower over a large number of calls
-
-	const u64 src_address = reinterpret_cast<u64>(src_ptr.data());
-	const bool sse_aligned = ((src_address & 15) == 0);
-
-#if !DEBUG_VERTEX_STREAMING
-
-	if (swap_endianness)
-	{
-		if (real_count >= count || real_count == 1)
-		{
-			if (attribute_src_stride == dst_stride && src_read_stride == dst_stride)
-				use_stream_no_stride = true;
 			else
-				use_stream_with_stride = true;
-		}
-	}
+			{
+				c.vptestmd(x86::k1, rtest, rtest);
+				c.ktestw(x86::k1, x86::k1);
+			}
 
+			c.setnz(x86::al);
+		}
+
+#ifndef __AVX__
+		c.vzeroupper();
 #endif
-
-	switch (type)
-	{
-	case rsx::vertex_base_type::ub:
-	case rsx::vertex_base_type::ub256:
-	{
-		if (use_stream_no_stride)
-			memcpy(raw_dst_span.data(), src_ptr.data(), count * dst_stride);
-		else if (use_stream_with_stride)
-			stream_data_to_memory_u8_non_continuous(raw_dst_span.data(), src_ptr.data(), count, vector_element_count, dst_stride, attribute_src_stride);
-		else
-			copy_whole_attribute_array<u8, u8>(raw_dst_span.data(), src_ptr.data(), vector_element_count, dst_stride, attribute_src_stride, count, real_count);
-
-		return;
+		c.ret();
 	}
-	case rsx::vertex_base_type::s1:
-	case rsx::vertex_base_type::sf:
-	case rsx::vertex_base_type::s32k:
-	{
-		if (use_stream_no_stride && sse_aligned)
-			stream_data_to_memory_swapped_u16(raw_dst_span.data(), src_ptr.data(), count, attribute_src_stride);
-		else if (use_stream_with_stride)
-			stream_data_to_memory_swapped_u16_non_continuous(raw_dst_span.data(), src_ptr.data(), count, dst_stride, attribute_src_stride);
-		else if (swap_endianness)
-			copy_whole_attribute_array<be_t<u16>, u16>(raw_dst_span.data(), src_ptr.data(), vector_element_count, dst_stride, attribute_src_stride, count, real_count);
-		else
-			copy_whole_attribute_array<u16, u16>(raw_dst_span.data(), src_ptr.data(), vector_element_count, dst_stride, attribute_src_stride, count, real_count);
 
-		return;
-	}
-	case rsx::vertex_base_type::f:
+	template <bool Compare>
+	void build_copy_data_swap_u32(asmjit::x86::Assembler& c, std::array<asmjit::x86::Gp, 4>& args)
 	{
-		if (use_stream_no_stride && sse_aligned)
-			stream_data_to_memory_swapped_u32(raw_dst_span.data(), src_ptr.data(), count, attribute_src_stride);
-		else if (use_stream_with_stride)
-			stream_data_to_memory_swapped_u32_non_continuous(raw_dst_span.data(), src_ptr.data(), count, dst_stride, attribute_src_stride);
-		else if (swap_endianness)
-			copy_whole_attribute_array<be_t<u32>, u32>(raw_dst_span.data(), src_ptr.data(), vector_element_count, dst_stride, attribute_src_stride, count, real_count);
-		else
-			copy_whole_attribute_array<u32, u32>(raw_dst_span.data(), src_ptr.data(), vector_element_count, dst_stride, attribute_src_stride, count, real_count);
+		using namespace asmjit;
 
-		return;
-	}
-	case rsx::vertex_base_type::cmp:
-	{
-		std::span<u16> dst_span = utils::bless<u16>(raw_dst_span);
-		for (u32 i = 0; i < count; ++i)
+		if (utils::has_avx512())
 		{
-			u32 src_value;
-			memcpy(&src_value, src_ptr.subspan(attribute_src_stride * i).data(), sizeof(u32));
+			if (utils::has_avx512_icl())
+			{
+				build_copy_data_swap_u32_avx3<Compare, 16>(c, args, x86::zmm0, x86::zmm1, x86::zmm2);
+				return;
+			}
 
-			if (swap_endianness) src_value = stx::se_storage<u32>::swap(src_value);
-
-			const auto& decoded_vector                 = decode_cmp_vector(src_value);
-			dst_span[i * dst_stride / sizeof(u16)] = decoded_vector[0];
-			dst_span[i * dst_stride / sizeof(u16) + 1] = decoded_vector[1];
-			dst_span[i * dst_stride / sizeof(u16) + 2] = decoded_vector[2];
-			dst_span[i * dst_stride / sizeof(u16) + 3] = decoded_vector[3];
+			build_copy_data_swap_u32_avx3<Compare, 8>(c, args, x86::ymm0, x86::ymm1, x86::ymm2);
+			return;
 		}
-		return;
-	}
+
+		if (utils::has_ssse3())
+		{
+			c.jmp(asmjit::imm_ptr(&copy_data_swap_u32_ssse3<Compare>));
+			return;
+		}
+
+		c.jmp(asmjit::imm_ptr(&copy_data_swap_u32_naive<Compare>));
 	}
 }
+
+built_function<void(*)(void*, const void*, u32)> copy_data_swap_u32("copy_data_swap_u32", &build_copy_data_swap_u32<false>);
+
+built_function<bool(*)(void*, const void*, u32)> copy_data_swap_u32_cmp("copy_data_swap_u32_cmp", &build_copy_data_swap_u32<true>);
 
 namespace
 {
