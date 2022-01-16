@@ -319,47 +319,78 @@ settings_dialog::settings_dialog(std::shared_ptr<gui_settings> gui_settings, std
 	}
 
 	// PPU tool tips
-	SubscribeTooltip(ui->ppu_precise, tooltips.settings.ppu_precise);
-	SubscribeTooltip(ui->ppu_fast,    tooltips.settings.ppu_fast);
+	SubscribeTooltip(ui->ppu__static, tooltips.settings.ppu__static);
+	SubscribeTooltip(ui->ppu_dynamic, tooltips.settings.ppu_dynamic);
 	SubscribeTooltip(ui->ppu_llvm,    tooltips.settings.ppu_llvm);
 
 	QButtonGroup *ppu_bg = new QButtonGroup(this);
-	ppu_bg->addButton(ui->ppu_precise, static_cast<int>(ppu_decoder_type::precise));
-	ppu_bg->addButton(ui->ppu_fast,    static_cast<int>(ppu_decoder_type::fast));
+	ppu_bg->addButton(ui->ppu__static, static_cast<int>(ppu_decoder_type::_static));
+	ppu_bg->addButton(ui->ppu_dynamic, static_cast<int>(ppu_decoder_type::dynamic));
 	ppu_bg->addButton(ui->ppu_llvm,    static_cast<int>(ppu_decoder_type::llvm));
 
 	m_emu_settings->EnhanceRadioButton(ppu_bg, emu_settings_type::PPUDecoder);
 
+	connect(ppu_bg, &QButtonGroup::idToggled, [this](int id, bool checked)
+	{
+		if (!checked) return;
+
+		switch (id)
+		{
+		case static_cast<int>(ppu_decoder_type::_static):
+			ui->accuratePPUFPCC->setEnabled(true);
+			ui->accuratePPUNJ->setEnabled(true);
+			ui->accuratePPUVNAN->setEnabled(true);
+			break;
+		case static_cast<int>(ppu_decoder_type::dynamic):
+		case static_cast<int>(ppu_decoder_type::llvm):
+			ui->accuratePPUFPCC->setEnabled(false);
+			ui->accuratePPUNJ->setEnabled(false);
+			ui->accuratePPUVNAN->setEnabled(false);
+			break;
+		default:
+			break;
+		}
+	});
+
 	// SPU tool tips
-	SubscribeTooltip(ui->spu_precise, tooltips.settings.spu_precise);
-	SubscribeTooltip(ui->spu_fast,    tooltips.settings.spu_fast);
+	SubscribeTooltip(ui->spu__static, tooltips.settings.spu__static);
+	SubscribeTooltip(ui->spu_dynamic, tooltips.settings.spu_dynamic);
 	SubscribeTooltip(ui->spu_asmjit,  tooltips.settings.spu_asmjit);
 	SubscribeTooltip(ui->spu_llvm,    tooltips.settings.spu_llvm);
 
-	QButtonGroup *spu_bg = new QButtonGroup(this);
-	spu_bg->addButton(ui->spu_precise, static_cast<int>(spu_decoder_type::precise));
-	spu_bg->addButton(ui->spu_fast,    static_cast<int>(spu_decoder_type::fast));
+	QButtonGroup* spu_bg = new QButtonGroup(this);
+	spu_bg->addButton(ui->spu__static, static_cast<int>(spu_decoder_type::_static));
+	spu_bg->addButton(ui->spu_dynamic, static_cast<int>(spu_decoder_type::dynamic));
 	spu_bg->addButton(ui->spu_asmjit,  static_cast<int>(spu_decoder_type::asmjit));
 	spu_bg->addButton(ui->spu_llvm,    static_cast<int>(spu_decoder_type::llvm));
 
+	connect(spu_bg, &QButtonGroup::idToggled, [this](int id, bool checked)
+	{
+		if (!checked) return;
+
+		switch (id)
+		{
+		case static_cast<int>(spu_decoder_type::_static):
+		case static_cast<int>(spu_decoder_type::dynamic):
+		case static_cast<int>(spu_decoder_type::llvm):
+			ui->accurateXFloat->setEnabled(true);
+			break;
+		case static_cast<int>(spu_decoder_type::asmjit):
+			ui->accurateXFloat->setEnabled(false);
+			break;
+		default:
+			break;
+		}
+	});
+
 	m_emu_settings->EnhanceRadioButton(spu_bg, emu_settings_type::SPUDecoder);
-
-	connect(ui->spu_llvm, &QAbstractButton::toggled, [this](bool checked)
-	{
-		ui->accurateXFloat->setEnabled(checked);
-	});
-
-	connect(ui->spu_fast, &QAbstractButton::toggled, [this](bool checked)
-	{
-		ui->accurateXFloat->setEnabled(checked);
-	});
-
-	ui->accurateXFloat->setEnabled(ui->spu_llvm->isChecked() || ui->spu_fast->isChecked());
 
 #ifndef LLVM_AVAILABLE
 	ui->ppu_llvm->setEnabled(false);
 	ui->spu_llvm->setEnabled(false);
+	ui->spu_dynamic->setEnabled(false);
 #endif
+	ui->ppu_dynamic->setEnabled(false);
 
 	//     _____ _____  _    _   _______    _
 	//    / ____|  __ \| |  | | |__   __|  | |
@@ -1138,12 +1169,27 @@ settings_dialog::settings_dialog(std::shared_ptr<gui_settings> gui_settings, std
 	m_emu_settings->EnhanceCheckBox(ui->debugConsoleMode, emu_settings_type::DebugConsoleMode);
 	SubscribeTooltip(ui->debugConsoleMode, tooltips.settings.debug_console_mode);
 
-	m_emu_settings->EnhanceCheckBox(ui->accurateLLVMdfma, emu_settings_type::AccurateLLVMdfma);
-	SubscribeTooltip(ui->accurateLLVMdfma, tooltips.settings.accurate_llvm_dfma);
-	ui->accurateLLVMdfma->setDisabled(utils::has_fma3() || utils::has_fma4());
+	m_emu_settings->EnhanceCheckBox(ui->accurateDFMA, emu_settings_type::AccurateDFMA);
+	SubscribeTooltip(ui->accurateDFMA, tooltips.settings.accurate_dfma);
+	ui->accurateDFMA->setDisabled(utils::has_fma3() || utils::has_fma4());
 
-	m_emu_settings->EnhanceCheckBox(ui->AccurateVectorNaN, emu_settings_type::AccurateVectorNaN);
-	SubscribeTooltip(ui->AccurateVectorNaN, tooltips.settings.accurate_vector_nan);
+	m_emu_settings->EnhanceCheckBox(ui->ppuNJFixup, emu_settings_type::PPUNJFixup);
+	SubscribeTooltip(ui->ppuNJFixup, tooltips.settings.fixup_ppunj);
+
+	m_emu_settings->EnhanceCheckBox(ui->accuratePPUSAT, emu_settings_type::AccuratePPUSAT);
+	SubscribeTooltip(ui->accuratePPUSAT, tooltips.settings.accurate_ppusat);
+
+	m_emu_settings->EnhanceCheckBox(ui->accuratePPUNJ, emu_settings_type::AccuratePPUNJ);
+	SubscribeTooltip(ui->accuratePPUNJ, tooltips.settings.accurate_ppunj);
+
+	m_emu_settings->EnhanceCheckBox(ui->fixupPPUVNAN, emu_settings_type::FixupPPUVNAN);
+	SubscribeTooltip(ui->fixupPPUVNAN, tooltips.settings.fixup_ppuvnan);
+
+	m_emu_settings->EnhanceCheckBox(ui->accuratePPUVNAN, emu_settings_type::AccuratePPUVNAN);
+	SubscribeTooltip(ui->accuratePPUVNAN, tooltips.settings.accurate_ppuvnan);
+
+	m_emu_settings->EnhanceCheckBox(ui->accuratePPUFPCC, emu_settings_type::AccuratePPUFPCC);
+	SubscribeTooltip(ui->accuratePPUFPCC, tooltips.settings.accurate_ppufpcc);
 
 	m_emu_settings->EnhanceCheckBox(ui->silenceAllLogs, emu_settings_type::SilenceAllLogs);
 	SubscribeTooltip(ui->silenceAllLogs, tooltips.settings.silence_all_logs);
@@ -1926,9 +1972,6 @@ settings_dialog::settings_dialog(std::shared_ptr<gui_settings> gui_settings, std
 
 	m_emu_settings->EnhanceCheckBox(ui->accurateRSXAccess, emu_settings_type::AccurateRSXAccess);
 	SubscribeTooltip(ui->accurateRSXAccess, tooltips.settings.accurate_rsx_access);
-
-	m_emu_settings->EnhanceCheckBox(ui->ppuLlvmJavaModeHandling, emu_settings_type::PPULLVMJavaModeHandling);
-	SubscribeTooltip(ui->ppuLlvmJavaModeHandling, tooltips.settings.ppu_llvm_java_mode_handling);
 
 	m_emu_settings->EnhanceCheckBox(ui->ppuPrecompilation, emu_settings_type::PPULLVMPrecompilation);
 	SubscribeTooltip(ui->ppuPrecompilation, tooltips.settings.ppu_precompilation);

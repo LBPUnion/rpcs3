@@ -19,10 +19,10 @@ namespace stx
 	class atomic_ptr;
 
 	// Basic assumption of userspace pointer size
-	constexpr uint c_ptr_size = 47;
+	constexpr uint c_ptr_size = 48;
 
 	// Use lower 17 bits as atomic_ptr internal counter of borrowed refs (pointer itself is shifted)
-	constexpr uint c_ref_mask = 0x1ffff, c_ref_size = 17;
+	constexpr uint c_ref_mask = 0xffff, c_ref_size = 16;
 
 	// Remaining pointer bits
 	constexpr uptr c_ptr_mask = static_cast<uptr>(-1) << c_ref_size;
@@ -1119,21 +1119,6 @@ namespace atomic_wait
 	constexpr u128 get_value(stx::atomic_ptr<T>&, const volatile void* value = nullptr)
 	{
 		return reinterpret_cast<uptr>(value) << stx::c_ref_size;
-	}
-}
-
-namespace std
-{
-	template <typename T>
-	void swap(stx::single_ptr<T>& lhs, stx::single_ptr<T>& rhs) noexcept
-	{
-		lhs.swap(rhs);
-	}
-
-	template <typename T>
-	void swap(stx::shared_ptr<T>& lhs, stx::shared_ptr<T>& rhs) noexcept
-	{
-		lhs.swap(rhs);
 	}
 }
 
