@@ -14,7 +14,6 @@
 
 #include <immintrin.h>
 #include <emmintrin.h>
-#include <cmath>
 #endif
 
 #if defined(ARCH_ARM64)
@@ -22,6 +21,7 @@
 #endif
 
 #include <cmath>
+#include <math.h>
 #include <cfenv>
 
 namespace asmjit
@@ -196,6 +196,11 @@ namespace asmjit
 		return mem.eval(std::is_reference_v<T>);
 	}
 
+	inline decltype(auto) arg_eval(const Operand& mem, u32)
+	{
+		return mem;
+	}
+
 	inline decltype(auto) arg_eval(Operand& mem, u32)
 	{
 		return mem;
@@ -204,6 +209,31 @@ namespace asmjit
 	inline decltype(auto) arg_eval(Operand&& mem, u32)
 	{
 		return std::move(mem);
+	}
+
+	template <typename T>
+	inline bool arg_use_evex(const auto& op)
+	{
+		constexpr auto _class = arg_classify<T>;
+		if constexpr (_class == arg_class::imm_rv)
+			return true;
+		else if constexpr (_class == arg_class::imm_lv)
+			return false;
+		else if (op.isMem())
+		{
+			// Check if broadcast is set, or if the offset immediate can use disp8*N encoding
+			mem_type mem{};
+			mem.copyFrom(op);
+			if (mem.hasBaseLabel())
+				return false;
+			if (mem.hasBroadcast())
+				return true;
+			if (!mem.hasOffset() || mem.offset() % mem.size() || u64(mem.offset() + 128) < 256 || u64(mem.offset() / mem.size() + 128) >= 256)
+				return false;
+			return true;
+		}
+
+		return false;
 	}
 
 	template <typename A, typename... Args>
@@ -259,7 +289,7 @@ namespace asmjit
 
 		if (utils::has_avx512() && evex_op)
 		{
-			if (!dst.hasBaseLabel() && dst.hasOffset() && dst.offset() % dst.size() == 0 && dst.offset() / dst.size() + 128 < 256)
+			if (!dst.hasBaseLabel() && dst.hasOffset() && dst.offset() % dst.size() == 0 && u64(dst.offset() + 128) >= 256 && u64(dst.offset() / dst.size() + 128) < 256)
 			{
 				ensure(!g_vc->evex().emit(evex_op, dst, arg_eval(std::forward<S>(s), 16)));
 				return;
@@ -279,7 +309,7 @@ namespace asmjit
 			// Use src1 as a destination
 			src1 = arg_eval(std::forward<A>(a), 16);
 
-			if (utils::has_avx512() && evex_op && (arg_classify<B> == arg_class::imm_rv || arg_classify<B> == arg_class::mem_rv || b.isMem()))
+			if (utils::has_avx512() && evex_op && arg_use_evex<B>(b))
 			{
 				ensure(!g_vc->evex().emit(evex_op, src1, src1, arg_eval(std::forward<B>(b), esize), std::forward<Args>(args)...));
 				return vec_type{src1.id()};
@@ -288,6 +318,7 @@ namespace asmjit
 			if constexpr (arg_classify<B> == arg_class::reg_rv)
 			{
 				g_vc->vec_dealloc(vec_type{b.id()});
+				//b = Operand();
 			}
 		}
 		else if (utils::has_avx() && avx_op && (arg_classify<A> == arg_class::reg_lv || arg_classify<A> == arg_class::mem_lv))
@@ -317,10 +348,11 @@ namespace asmjit
 				if constexpr (arg_classify<B> == arg_class::reg_rv)
 				{
 					g_vc->vec_dealloc(vec_type{b.id()});
+					//b = Operand();
 				}
 			}
 
-			if (utils::has_avx512() && evex_op && (arg_classify<B> == arg_class::imm_rv || arg_classify<B> == arg_class::mem_rv || b.isMem()))
+			if (utils::has_avx512() && evex_op && arg_use_evex<B>(b))
 			{
 				ensure(!g_vc->evex().emit(evex_op, src1, vec_type{a.id()}, arg_eval(std::forward<B>(b), esize), std::forward<Args>(args)...));
 				return vec_type{src1.id()};
@@ -334,6 +366,7 @@ namespace asmjit
 			if constexpr (arg_classify<B> == arg_class::reg_rv)
 			{
 				g_vc->vec_dealloc(vec_type{b.id()});
+				//b = Operand();
 			}
 
 			if (arg_classify<A> == arg_class::mem_rv && a.isReg())
@@ -349,7 +382,7 @@ namespace asmjit
 		}
 		while (0);
 
-		if (utils::has_avx512() && evex_op && (arg_classify<B> == arg_class::imm_rv || arg_classify<B> == arg_class::mem_rv || b.isMem()))
+		if (utils::has_avx512() && evex_op && arg_use_evex<B>(b))
 		{
 			ensure(!g_vc->evex().emit(evex_op, src1, src1, arg_eval(std::forward<B>(b), esize), std::forward<Args>(args)...));
 		}
@@ -660,6 +693,24 @@ template <typename A, typename B> requires (asmjit::any_operand_v<A, B>)
 inline auto gv_xorfs(A&& a, B&& b)
 {
 	FOR_X64(binary_op, 4, kIdMovaps, kIdXorps, kIdVxorps, kIdVxorps, std::forward<A>(a), std::forward<B>(b));
+}
+
+inline v128 gv_not32(const v128& a)
+{
+#if defined(ARCH_X64)
+	return _mm_xor_si128(a, _mm_set1_epi32(-1));
+#elif defined(ARCH_ARM64)
+	return vmvnq_u32(a);
+#endif
+}
+
+inline v128 gv_notfs(const v128& a)
+{
+#if defined(ARCH_X64)
+	return _mm_xor_ps(a, _mm_castsi128_ps(_mm_set1_epi32(-1)));
+#elif defined(ARCH_ARM64)
+	return vmvnq_u32(a);
+#endif
 }
 
 inline v128 gv_shl16(const v128& a, u32 count)
@@ -1520,6 +1571,24 @@ inline v128 gv_avgs32(const v128& a, const v128& b)
 #endif
 }
 
+inline v128 gv_divfs(const v128& a, const v128& b)
+{
+#if defined(ARCH_X64)
+	return _mm_div_ps(a, b);
+#elif defined(ARCH_ARM64)
+	return vdivq_f32(a, b);
+#endif
+}
+
+inline v128 gv_sqrtfs(const v128& a)
+{
+#if defined(ARCH_X64)
+	return _mm_sqrt_ps(a);
+#elif defined(ARCH_ARM64)
+	return vsqrtq_f32(a);
+#endif
+}
+
 inline v128 gv_fmafs(const v128& a, const v128& b, const v128& c)
 {
 #if defined(ARCH_X64) && defined(__FMA__)
@@ -1644,7 +1713,7 @@ inline v128 gv_mul32(const v128& a, const v128& b)
 #elif defined(ARCH_X64)
 	const __m128i lows = _mm_shuffle_epi32(_mm_mul_epu32(a, b), 8);
 	const __m128i highs = _mm_shuffle_epi32(_mm_mul_epu32(_mm_srli_epi64(a, 32), _mm_srli_epi64(b, 32)), 8);
-	return _mm_unpacklo_epi64(lows, highs);
+	return _mm_unpacklo_epi32(lows, highs);
 #elif defined(ARCH_ARM64)
 	return vmulq_s32(a, b);
 #endif
@@ -1813,6 +1882,53 @@ inline v128 gv_dots_s16x2(const v128& a, const v128& b, const v128& c)
 #endif
 }
 
+// Multiply s16 elements 0, 2, 4, 6 to produce s32 results in corresponding lanes
+inline v128 gv_mul_even_s16(const v128& a, const v128& b)
+{
+#if defined(ARCH_X64)
+	const auto c = _mm_set1_epi32(0x0000ffff);
+	return _mm_madd_epi16(_mm_and_si128(a, c), _mm_and_si128(b, c));
+#else
+	// TODO
+	return gv_mul32(gv_sar32(gv_shl32(a, 16), 16), gv_sar32(gv_shl32(b, 16), 16));
+#endif
+}
+
+// Multiply u16 elements 0, 2, 4, 6 to produce u32 results in corresponding lanes
+inline v128 gv_mul_even_u16(const v128& a, const v128& b)
+{
+#if defined(__SSE4_1__) || defined(ARCH_ARM64)
+	const auto c = gv_bcst32(0x0000ffff);
+	return gv_mul32(a & c, b & c);
+#elif defined(ARCH_X64)
+	const auto ml = _mm_mullo_epi16(a, b);
+	const auto mh = _mm_mulhi_epu16(a, b);
+	return _mm_or_si128(_mm_and_si128(ml, _mm_set1_epi32(0x0000ffff)), _mm_slli_epi32(mh, 16));
+#endif
+}
+
+// Multiply s16 elements 1, 3, 5, 7 to produce s32 results in corresponding lanes
+inline v128 gv_mul_odds_s16(const v128& a, const v128& b)
+{
+#if defined(ARCH_X64)
+	return _mm_madd_epi16(_mm_srli_epi32(a, 16), _mm_srli_epi32(b, 16));
+#else
+	return gv_mul32(gv_sar32(a, 16), gv_sar32(b, 16));
+#endif
+}
+
+// Multiply u16 elements 1, 3, 5, 7 to produce u32 results in corresponding lanes
+inline v128 gv_mul_odds_u16(const v128& a, const v128& b)
+{
+#if defined(__SSE4_1__) || defined(ARCH_ARM64)
+	return gv_mul32(gv_shr32(a, 16), gv_shr32(b, 16));
+#elif defined(ARCH_X64)
+	const auto ml = _mm_mullo_epi16(a, b);
+	const auto mh = _mm_mulhi_epu16(a, b);
+	return _mm_or_si128(_mm_and_si128(mh, _mm_set1_epi32(0xffff0000)), _mm_srli_epi32(ml, 16));
+#endif
+}
+
 inline v128 gv_cvts32_tofs(const v128& src)
 {
 #if defined(ARCH_X64)
@@ -1854,6 +1970,136 @@ inline v128 gv_cvtfs_tou32(const v128& src)
 	return _mm_or_si128(c1, _mm_and_si128(c2, s1));
 #elif defined(ARCH_ARM64)
 	return vcvtq_u32_f32(src);
+#endif
+}
+
+namespace utils
+{
+	inline f32 roundevenf32(f32 arg)
+	{
+		u32 val = std::bit_cast<u32>(arg);
+		u32 exp = (val >> 23) & 0xff;
+		u32 abs = val & 0x7fffffff;
+
+		if (exp >= 127 + 23)
+		{
+			// Big enough, NaN or INF
+			return arg;
+		}
+		else if (exp >= 127)
+		{
+			u32 int_pos = (127 + 23) - exp;
+			u32 half_pos = int_pos - 1;
+			u32 half_bit = 1u << half_pos;
+			u32 int_bit = 1u << int_pos;
+			if (val & (int_bit | (half_bit - 1)))
+				val += half_bit;
+			val &= ~(int_bit - 1);
+		}
+		else if (exp == 126 && abs > 0x3f000000)
+		{
+			val &= 0x80000000;
+			val |= 0x3f800000;
+		}
+		else
+		{
+			val &= 0x80000000;
+		}
+
+		return std::bit_cast<f32>(val);
+	}
+}
+
+#if defined(ARCH_X64)
+template <uint Mode>
+inline built_function<__m128(*)(__m128)> sse41_roundf("sse41_roundf", [](native_asm& c, native_args&)
+{
+	static_assert(Mode < 4);
+	using namespace asmjit;
+	if (utils::has_avx())
+		c.vroundps(x86::xmm0, x86::xmm0, 8 + Mode);
+	else if (utils::has_sse41())
+		c.roundps(x86::xmm0, x86::xmm0, 8 + Mode);
+	else
+		c.jmp(+[](__m128 a) -> __m128
+		{
+			v128 r = a;
+			for (u32 i = 0; i < 4; i++)
+				if constexpr (Mode == 0)
+					r._f[i] = utils::roundevenf32(r._f[i]);
+				else if constexpr (Mode == 1)
+					r._f[i] = ::floorf(r._f[i]);
+				else if constexpr (Mode == 2)
+					r._f[i] = ::ceilf(r._f[i]);
+				else if constexpr (Mode == 3)
+					r._f[i] = ::truncf(r._f[i]);
+			return r;
+		});
+	c.ret();
+});
+#endif
+
+inline v128 gv_roundfs_even(const v128& a)
+{
+#if defined(__SSE4_1__)
+	return _mm_round_ps(a, 8 + 0);
+#elif defined(ARCH_ARM64)
+	return vrndnq_f32(a);
+#elif defined(ARCH_X64)
+	return sse41_roundf<0>(a);
+#else
+	v128 r;
+	for (u32 i = 0; i < 4; i++)
+		r._f[i] = utils::roundevenf32(a._f[i]);
+	return r;
+#endif
+}
+
+inline v128 gv_roundfs_ceil(const v128& a)
+{
+#if defined(__SSE4_1__)
+	return _mm_round_ps(a, 8 + 2);
+#elif defined(ARCH_ARM64)
+	return vrndpq_f32(a);
+#elif defined(ARCH_X64)
+	return sse41_roundf<2>(a);
+#else
+	v128 r;
+	for (u32 i = 0; i < 4; i++)
+		r._f[i] = ::ceilf(a._f[i]);
+	return r;
+#endif
+}
+
+inline v128 gv_roundfs_floor(const v128& a)
+{
+#if defined(__SSE4_1__)
+	return _mm_round_ps(a, 8 + 1);
+#elif defined(ARCH_ARM64)
+	return vrndmq_f32(a);
+#elif defined(ARCH_X64)
+	return sse41_roundf<1>(a);
+#else
+	v128 r;
+	for (u32 i = 0; i < 4; i++)
+		r._f[i] = ::floorf(a._f[i]);
+	return r;
+#endif
+}
+
+inline v128 gv_roundfs_trunc(const v128& a)
+{
+#if defined(__SSE4_1__)
+	return _mm_round_ps(a, 8 + 3);
+#elif defined(ARCH_ARM64)
+	return vrndq_f32(a);
+#elif defined(ARCH_X64)
+	return sse41_roundf<3>(a);
+#else
+	v128 r;
+	for (u32 i = 0; i < 4; i++)
+		r._f[i] = ::truncf(a._f[i]);
+	return r;
 #endif
 }
 
@@ -1952,6 +2198,90 @@ inline v128 gv_selectfs(const v128& _cmp, const v128& _true, const v128& _false)
 	return vbslq_f32(_cmp, _true, _false);
 #else
 	return _mm_or_ps(_mm_and_ps(_cmp, _true), _mm_andnot_ps(_cmp, _false));
+#endif
+}
+
+inline v128 gv_packss_s16(const v128& low, const v128& high)
+{
+#if defined(ARCH_X64)
+	return _mm_packs_epi16(low, high);
+#elif defined(ARCH_ARM64)
+	return vcombine_s8(vqmovn_s16(low), vqmovn_s16(high));
+#endif
+}
+
+inline v128 gv_packus_s16(const v128& low, const v128& high)
+{
+#if defined(ARCH_X64)
+	return _mm_packus_epi16(low, high);
+#elif defined(ARCH_ARM64)
+	return vcombine_u8(vqmovun_s16(low), vqmovun_s16(high));
+#endif
+}
+
+inline v128 gv_packus_u16(const v128& low, const v128& high)
+{
+#if defined(__SSE4_1__)
+	return _mm_packus_epi16(_mm_min_epu16(low, _mm_set1_epi16(0xff)), _mm_min_epu16(high, _mm_set1_epi16(0xff)));
+#elif defined(ARCH_X64)
+	return _mm_packus_epi16(_mm_sub_epi16(low, _mm_subs_epu16(low, _mm_set1_epi16(0xff))), _mm_sub_epi16(high, _mm_subs_epu16(high, _mm_set1_epi16(0xff))));
+#elif defined(ARCH_ARM64)
+	return vcombine_u8(vqmovn_u16(low), vqmovn_u16(high));
+#endif
+}
+
+inline v128 gv_packtu16(const v128& low, const v128& high)
+{
+#if defined(ARCH_X64)
+	return _mm_packus_epi16(low & _mm_set1_epi16(0xff), high & _mm_set1_epi16(0xff));
+#elif defined(ARCH_ARM64)
+	return vuzp1q_s8(low, high);
+#endif
+}
+
+inline v128 gv_packss_s32(const v128& low, const v128& high)
+{
+#if defined(ARCH_X64)
+	return _mm_packs_epi32(low, high);
+#elif defined(ARCH_ARM64)
+	return vcombine_s16(vqmovn_s32(low), vqmovn_s32(high));
+#endif
+}
+
+inline v128 gv_packus_s32(const v128& low, const v128& high)
+{
+#if defined(__SSE4_1__)
+	return _mm_packus_epi32(low, high);
+#elif defined(ARCH_X64)
+	const auto s = _mm_srai_epi16(_mm_packs_epi32(low, high), 15);
+	const auto r = gv_add16(_mm_packs_epi32(gv_sub32(low, gv_bcst32(0x8000)), gv_sub32(high, gv_bcst32(0x8000))), gv_bcst16(0x8000));
+	return gv_andn(s, r);
+#elif defined(ARCH_ARM64)
+	return vcombine_u16(vqmovun_s32(low), vqmovun_s32(high));
+#endif
+}
+
+inline v128 gv_packus_u32(const v128& low, const v128& high)
+{
+#if defined(__SSE4_1__)
+	return _mm_packus_epi32(_mm_min_epu32(low, _mm_set1_epi32(0xffff)), _mm_min_epu32(high, _mm_set1_epi32(0xffff)));
+#elif defined(ARCH_X64)
+	const v128 s = _mm_cmpgt_epi16(_mm_packs_epi32(_mm_srli_epi32(low, 16), _mm_srli_epi32(high, 16)), _mm_setzero_si128());
+	const v128 r = _mm_packs_epi32(_mm_srai_epi32(_mm_slli_epi32(low, 16), 16), _mm_srai_epi32(_mm_slli_epi32(high, 16), 16));
+	return _mm_or_si128(r, s);
+#elif defined(ARCH_ARM64)
+	return vcombine_u16(vqmovn_u32(low), vqmovn_u32(high));
+#endif
+}
+
+inline v128 gv_packtu32(const v128& low, const v128& high)
+{
+#if defined(__SSE4_1__)
+	return _mm_packus_epi32(low & _mm_set1_epi32(0xffff), high & _mm_set1_epi32(0xffff));
+#elif defined(ARCH_X64)
+	return _mm_packs_epi32(_mm_srai_epi32(_mm_slli_epi32(low, 16), 16), _mm_srai_epi32(_mm_slli_epi32(high, 16), 16));
+#elif defined(ARCH_ARM64)
+	return vuzp1q_s16(low, high);
 #endif
 }
 

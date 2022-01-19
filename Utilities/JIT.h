@@ -211,8 +211,6 @@ namespace asmjit
 		static_cast<void>(args);
 #endif
 	}
-
-	using imm_ptr = Imm;
 }
 
 // Build runtime function with asmjit::X86Assembler
@@ -270,23 +268,13 @@ public:
 
 	built_function& operator=(const built_function&) = delete;
 
-	template <typename F> requires (std::is_invocable_v<F, native_asm&, native_args&>)
+	template <typename F>
 	built_function(std::string_view name, F&& builder,
 		u32 line = __builtin_LINE(),
 		u32 col = __builtin_COLUMN(),
 		const char* file = __builtin_FILE(),
 		const char* func = __builtin_FUNCTION())
 		: m_func(ensure(build_function_asm<FT>(name, std::forward<F>(builder)), const_str(), line, col, file, func))
-	{
-	}
-
-	template <typename F> requires (std::is_invocable_v<F>)
-	built_function(std::string_view, F&& getter,
-		u32 line = __builtin_LINE(),
-		u32 col = __builtin_COLUMN(),
-		const char* file = __builtin_FILE(),
-		const char* func = __builtin_FUNCTION())
-		: m_func(ensure(getter(), const_str(), line, col, file, func))
 	{
 	}
 

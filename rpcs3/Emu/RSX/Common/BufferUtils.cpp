@@ -269,17 +269,17 @@ namespace
 
 		if (utils::has_ssse3())
 		{
-			c.jmp(asmjit::imm_ptr(&copy_data_swap_u32_ssse3<Compare>));
+			c.jmp(&copy_data_swap_u32_ssse3<Compare>);
 			return;
 		}
 
-		c.jmp(asmjit::imm_ptr(&copy_data_swap_u32_naive<Compare>));
+		c.jmp(&copy_data_swap_u32_naive<Compare>);
 	}
-#else
+#elif defined(ARCH_ARM64)
 	template <bool Compare>
-	constexpr auto build_copy_data_swap_u32()
+	void build_copy_data_swap_u32(native_asm& c, native_args& args)
 	{
-		return &copy_data_swap_u32_naive<Compare>;
+		c.b(&copy_data_swap_u32_naive<Compare>);
 	}
 #endif
 }
