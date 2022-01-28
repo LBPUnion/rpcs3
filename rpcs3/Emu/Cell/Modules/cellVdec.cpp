@@ -102,7 +102,7 @@ struct vdec_context final
 	static const u32 id_step = 0x00000100;
 	static const u32 id_count = 1024;
 
-	AVCodec* codec{};
+	const AVCodec* codec{};
 	AVCodecContext* ctx{};
 	SwsContext* sws{};
 
@@ -1219,6 +1219,10 @@ error_code cellVdecSetPts(u32 handle, vm::ptr<void> unk)
 
 DECLARE(ppu_module_manager::cellVdec)("libvdec", []()
 {
+#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(58, 10, 100)
+	avcodec_register_all();
+#endif
+
 	static ppu_static_module libavcdec("libavcdec");
 	static ppu_static_module libdivx311dec("libdivx311dec");
 	static ppu_static_module libdivxdec("libdivxdec");

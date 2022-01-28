@@ -157,7 +157,7 @@ DECLARE(spu_runtime::tr_all) = []
 	return reinterpret_cast<spu_function_t>(trptr);
 }();
 
-DECLARE(spu_runtime::g_gateway) = built_function<spu_function_t>("spu_gateway", [](native_asm& c, auto& args)
+DECLARE(spu_runtime::g_gateway) = build_function_asm<spu_function_t>("spu_gateway", [](native_asm& c, auto& args)
 {
 	// Gateway for SPU dispatcher, converts from native to GHC calling convention, also saves RSP value for spu_escape
 	using namespace asmjit;
@@ -1074,7 +1074,9 @@ spu_function_t spu_runtime::rebuild_ubertrampoline(u32 id_inst)
 		workload.clear();
 		result = reinterpret_cast<spu_function_t>(reinterpret_cast<u64>(wxptr));
 
-		jit_announce(wxptr, raw - wxptr, "spu_ubertrampoline");
+		std::string fname;
+		fmt::append(fname, "__ub%u", m_flat_list.size());
+		jit_announce(wxptr, raw - wxptr, fname);
 	}
 
 	if (auto _old = stuff_it->trampoline.compare_and_swap(nullptr, result))
@@ -3487,7 +3489,7 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 #endif
 
 		// Get function chunk name
-		const std::string name = fmt::format("spu-cx%05x-%s", addr, fmt::base57(be_t<u64>{m_hash_start}));
+		const std::string name = fmt::format("__spu-cx%05x-%s", addr, fmt::base57(be_t<u64>{m_hash_start}));
 		llvm::Function* result = llvm::cast<llvm::Function>(m_module->getOrInsertFunction(name, chunk_type).getCallee());
 
 		// Set parameters
@@ -3512,7 +3514,7 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 				// 5. $3
 				const auto func_type = get_ftype<u32[4], u8*, u8*, u32, u32[4], u32[4]>();
 
-				const std::string fname = fmt::format("spu-fx%05x-%s", addr, fmt::base57(be_t<u64>{m_hash_start}));
+				const std::string fname = fmt::format("__spu-fx%05x-%s", addr, fmt::base57(be_t<u64>{m_hash_start}));
 				llvm::Function* fn = llvm::cast<llvm::Function>(m_module->getOrInsertFunction(fname, func_type).getCallee());
 
 				fn->setLinkage(llvm::GlobalValue::InternalLinkage);
@@ -4381,7 +4383,7 @@ public:
 			sha1_finish(&ctx, output);
 
 			m_hash.clear();
-			fmt::append(m_hash, "spu-0x%05x-%s", func.entry_point, fmt::base57(output));
+			fmt::append(m_hash, "__spu-0x%05x-%s", func.entry_point, fmt::base57(output));
 
 			be_t<u64> hash_start;
 			std::memcpy(&hash_start, output, sizeof(hash_start));
@@ -4649,7 +4651,7 @@ public:
 			m_ir->CreateUnreachable();
 		}
 
-		m_dispatch = cast<Function>(_module->getOrInsertFunction("spu-null", entry_chunk->chunk->getFunctionType()).getCallee());
+		m_dispatch = cast<Function>(_module->getOrInsertFunction("__spu-null", entry_chunk->chunk->getFunctionType()).getCallee());
 		m_dispatch->setLinkage(llvm::GlobalValue::InternalLinkage);
 		m_dispatch->setCallingConv(entry_chunk->chunk->getCallingConv());
 		set_function(m_dispatch);

@@ -360,7 +360,7 @@ namespace rsx
 
 				const u16 dst_w = static_cast<u16>(std::get<2>(clipped).width);
 				const u16 src_w = static_cast<u16>(dst_w * attr.bpp) / section_bpp;
-				const u16 height = static_cast<u16>(dst_h);
+				const u16 height = std::min(slice_end, section_end) - dst_y;
 
 				if (scaling)
 				{
@@ -658,7 +658,6 @@ namespace rsx
 			{
 				attr2.width = scaled_w;
 				attr2.height = scaled_h;
-				attr2.depth = 1;
 
 				sampled_image_descriptor desc = { nullptr, deferred_request_command::cubemap_gather,
 						attr2, {},
