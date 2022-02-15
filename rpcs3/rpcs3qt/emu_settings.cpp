@@ -1027,6 +1027,13 @@ QString emu_settings::GetLocalizedSetting(const QString& original, emu_settings_
 		case camera_handler::qt: return tr("Qt", "Camera handler");
 		}
 		break;
+	case emu_settings_type::PadHandlerMode:
+		switch (static_cast<pad_handler_mode>(index))
+		{
+		case pad_handler_mode::single_threaded: return tr("Single-threaded", "Pad handler mode");
+		case pad_handler_mode::multi_threaded: return tr("Multi-threaded", "Pad handler mode");
+		}
+		break;
 	case emu_settings_type::Move:
 		switch (static_cast<move_handler>(index))
 		{
@@ -1144,6 +1151,13 @@ QString emu_settings::GetLocalizedSetting(const QString& original, emu_settings_
 		case CellSysutilLicenseArea::CELL_SYSUTIL_LICENSE_AREA_K: return tr("Korea", "License Area");
 		case CellSysutilLicenseArea::CELL_SYSUTIL_LICENSE_AREA_C: return tr("China", "License Area");
 		case CellSysutilLicenseArea::CELL_SYSUTIL_LICENSE_AREA_OTHER: return tr("Other", "License Area");
+		}
+		break;
+	case emu_settings_type::VulkanAsyncSchedulerDriver:
+		switch (static_cast<vk_gpu_scheduler_mode>(index))
+		{
+		case vk_gpu_scheduler_mode::safe: return tr("Safe");
+		case vk_gpu_scheduler_mode::fast: return tr("Fast");
 		}
 		break;
 	default:

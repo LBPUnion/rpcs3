@@ -1063,6 +1063,9 @@ settings_dialog::settings_dialog(std::shared_ptr<gui_settings> gui_settings, std
 		SubscribeTooltip(ui->gb_camera_id, tooltips.settings.camera_id);
 	}
 
+	m_emu_settings->EnhanceComboBox(ui->padModeBox, emu_settings_type::PadHandlerMode);
+	SubscribeTooltip(ui->gb_pad_mode, tooltips.settings.pad_mode);
+
 	m_emu_settings->EnhanceComboBox(ui->moveBox, emu_settings_type::Move);
 	SubscribeTooltip(ui->gb_move_handler, tooltips.settings.move);
 
@@ -1995,12 +1998,16 @@ settings_dialog::settings_dialog(std::shared_ptr<gui_settings> gui_settings, std
 	m_emu_settings->EnhanceComboBox(ui->combo_num_ppu_threads, emu_settings_type::NumPPUThreads, true);
 	SubscribeTooltip(ui->gb_num_ppu_threads, tooltips.settings.num_ppu_threads);
 
-	// Layout fix for High Dpi
-	layout()->setSizeConstraint(QLayout::SetFixedSize);
+	if (!restoreGeometry(m_gui_settings->GetValue(gui::cfg_geometry).toByteArray()))
+	{
+		// Ignore. This will most likely only fail if the setting doesn't contain any values
+	}
 }
 
 settings_dialog::~settings_dialog()
 {
+	m_gui_settings->SetValue(gui::cfg_geometry, saveGeometry());
+
 	delete ui;
 }
 

@@ -70,6 +70,7 @@ void progress_dialog_server::operator()()
 			if (manager && !skip_this_one)
 			{
 				MsgDialogType type{};
+				type.se_mute_on         = true;
 				type.se_normal          = true;
 				type.bg_invisible       = true;
 				type.disable_cancel     = true;
@@ -88,17 +89,17 @@ void progress_dialog_server::operator()()
 			dlg->type.progress_bar_count = 1;
 			dlg->on_close = [](s32 /*status*/)
 			{
-				Emu.CallAfter([]()
+				Emu.CallFromMainThread([]()
 				{
 					// Abort everything
 					sys_log.notice("Aborted progress dialog");
-					Emu.Stop();
+					Emu.GracefulShutdown(false, true);
 				});
 
 				g_system_progress_canceled = true;
 			};
 
-			Emu.CallAfter([dlg, text0]()
+			Emu.CallFromMainThread([dlg, text0]()
 			{
 				dlg->Create(text0, text0);
 			});
@@ -163,7 +164,7 @@ void progress_dialog_server::operator()()
 				}
 				else if (dlg)
 				{
-					Emu.CallAfter([=]()
+					Emu.CallFromMainThread([=]()
 					{
 						dlg->SetMsg(text_new);
 						dlg->ProgressBarSetMsg(0, progr);
@@ -190,7 +191,7 @@ void progress_dialog_server::operator()()
 		}
 		else if (dlg)
 		{
-			Emu.CallAfter([=]()
+			Emu.CallFromMainThread([=]()
 			{
 				dlg->Close(true);
 			});

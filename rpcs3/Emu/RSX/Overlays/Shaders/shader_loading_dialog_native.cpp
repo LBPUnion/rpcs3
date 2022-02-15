@@ -14,6 +14,7 @@ namespace rsx
 	void shader_loading_dialog_native::create(const std::string& msg, const std::string&/* title*/)
 	{
 		MsgDialogType type = {};
+		type.se_mute_on     = true;
 		type.disable_cancel = true;
 		type.progress_bar_count = 2;
 
@@ -24,7 +25,7 @@ namespace rsx
 			if (status != CELL_OK)
 			{
 				rsx_log.notice("Aborted shader loading dialog");
-				Emu.Stop();
+				Emu.Kill(false);
 			}
 		});
 	}

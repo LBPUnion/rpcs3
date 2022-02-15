@@ -1015,12 +1015,22 @@ namespace rsx
 
 		void clear()
 		{
+			// Release objects used for frame data
+			on_frame_end();
+
+			// Nuke the permanent storage pool
 			m_storage.clear();
 			m_predictor.clear();
 		}
 
 		virtual void on_frame_end()
 		{
+			// Must manually release each cached entry
+			for (auto& entry : m_temporary_subresource_cache)
+			{
+				release_temporary_subresource(entry.second.second);
+			}
+
 			m_temporary_subresource_cache.clear();
 			m_predictor.on_frame_end();
 			reset_frame_statistics();
@@ -1922,7 +1932,7 @@ namespace rsx
 								if (const auto coverage_ratio = (coverage_size * 100ull) / memory_range.length();
 									coverage_ratio > max_overdraw_ratio)
 								{
-									rsx_log.error("[Performance warning] Texture gather routine encountered too many objects! Operation=%d, Mipmaps=%d, Depth=%d, Sections=%zu, Ratio=%llu%",
+									rsx_log.warning("[Performance warning] Texture gather routine encountered too many objects! Operation=%d, Mipmaps=%d, Depth=%d, Sections=%zu, Ratio=%llu%",
 										static_cast<int>(result.external_subresource_desc.op), attr.mipmaps, attr.depth, overlapping_fbos.size(), coverage_ratio);
 									m_rtts.check_for_duplicates(overlapping_fbos, memory_range);
 								}
