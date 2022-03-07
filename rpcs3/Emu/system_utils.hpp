@@ -15,6 +15,10 @@ namespace rpcs3::utils
 
 #ifdef _WIN32
 	std::string get_exe_dir();
+#elif defined(__APPLE__)
+	std::string get_app_bundle_path();
+#else
+	std::string get_executable_path();
 #endif
 
 	std::string get_emu_dir();

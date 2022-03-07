@@ -1063,6 +1063,9 @@ settings_dialog::settings_dialog(std::shared_ptr<gui_settings> gui_settings, std
 		SubscribeTooltip(ui->gb_camera_id, tooltips.settings.camera_id);
 	}
 
+	m_emu_settings->EnhanceComboBox(ui->musicHandlerBox, emu_settings_type::MusicHandler);
+	SubscribeTooltip(ui->gb_music_handler, tooltips.settings.music_handler);
+
 	m_emu_settings->EnhanceComboBox(ui->padModeBox, emu_settings_type::PadHandlerMode);
 	SubscribeTooltip(ui->gb_pad_mode, tooltips.settings.pad_mode);
 
@@ -1231,6 +1234,13 @@ settings_dialog::settings_dialog(std::shared_ptr<gui_settings> gui_settings, std
 
 	m_emu_settings->EnhanceComboBox(ui->vulkansched, emu_settings_type::VulkanAsyncSchedulerDriver);
 	SubscribeTooltip(ui->gb_vulkansched, tooltips.settings.vulkan_async_scheduler);
+
+	m_emu_settings->EnhanceComboBox(ui->metalsemaphore, emu_settings_type::MetalSemaphore);
+#ifdef __APPLE__
+	SubscribeTooltip(ui->gb_metalsemaphore, tooltips.settings.metal_semaphore);
+#else
+	ui->gb_metalsemaphore->setVisible(false);
+#endif
 
 	// Sliders
 
@@ -1945,14 +1955,17 @@ settings_dialog::settings_dialog(std::shared_ptr<gui_settings> gui_settings, std
 	m_emu_settings->EnhanceCheckBox(ui->strictTextureFlushing, emu_settings_type::StrictTextureFlushing);
 	SubscribeTooltip(ui->strictTextureFlushing, tooltips.settings.strict_texture_flushing);
 
-	m_emu_settings->EnhanceCheckBox(ui->DisableNativefp16, emu_settings_type::DisableNativefloat16);
-	SubscribeTooltip(ui->DisableNativefp16, tooltips.settings.disable_native_fp16);
+	m_emu_settings->EnhanceCheckBox(ui->disableNativefp16, emu_settings_type::DisableNativefloat16);
+	SubscribeTooltip(ui->disableNativefp16, tooltips.settings.disable_native_fp16);
 
 	m_emu_settings->EnhanceCheckBox(ui->Enable3D, emu_settings_type::Enable3D);
 	SubscribeTooltip(ui->Enable3D, tooltips.settings.enable_3d);
 
 	m_emu_settings->EnhanceCheckBox(ui->gpuTextureScaling, emu_settings_type::GPUTextureScaling);
 	SubscribeTooltip(ui->gpuTextureScaling, tooltips.settings.gpu_texture_scaling);
+
+	m_emu_settings->EnhanceCheckBox(ui->allowHostGPULabels, emu_settings_type::AllowHostGPULabels);
+	SubscribeTooltip(ui->allowHostGPULabels, tooltips.settings.allow_host_labels);
 
 	// Checkboxes: core debug options
 	m_emu_settings->EnhanceCheckBox(ui->ppuDebug, emu_settings_type::PPUDebug);
